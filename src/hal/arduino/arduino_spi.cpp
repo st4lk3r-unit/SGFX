@@ -1,3 +1,6 @@
+#ifndef SGFX_SPI_CHUNK_BYTES
+#define SGFX_SPI_CHUNK_BYTES 4096
+#endif
 #if defined(SGFX_HAL_ARDUINO_GENERIC) && defined(SGFX_BUS_SPI)
 #include "sgfx.h"
 #include "sgfx_port.h"
@@ -154,3 +157,6 @@ extern "C" int sgfx_hal_make_spi(sgfx_bus_t* out, const sgfx_hal_cfg_spi_t* cfg)
   return SGFX_OK;
 }
 #endif
+
+
+

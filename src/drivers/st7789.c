@@ -1,6 +1,7 @@
 #ifdef SGFX_DRV_ST7789
 
 #include "sgfx.h"
+#include "st77xx_common.h"
 #include "sgfx_port.h"
 #include <stdint.h>
 #include <stdlib.h>

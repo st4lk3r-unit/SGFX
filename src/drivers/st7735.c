@@ -1,6 +1,13 @@
+/* SGFX ST7735 driver (RGB565, streaming, no per-device state)
+ * - Works with 80x160 "green-tab" style panels (T-Dongle-S3 etc.)
+ * - Rotation via MADCTL (0..3)
+ * - Offsets (COLSTART/ROWSTART) swap automatically on MV rotations
+ * - Optional color order (BGR/RGB) and inversion
+ */
 #ifdef SGFX_DRV_ST7735
 
 #include "sgfx.h"
+#include "st77xx_common.h"
 #include "sgfx_port.h"
 #include <stdint.h>
 #include <string.h>

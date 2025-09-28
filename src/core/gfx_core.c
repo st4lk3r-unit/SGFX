@@ -179,6 +179,39 @@ int sgfx_blit(sgfx_device_t* d, int x,int y, int w,int h,
   };
 #endif
 
+// /* Render 8x8: handle both bit orders transparently. */
+// int sgfx_text8x8(sgfx_device_t* d, int x,int y, const char* s, sgfx_rgba8_t c){
+//   if (!s) return SGFX_ERR_INVAL;
+//   int cx = x;
+//   for (; *s; ++s, cx += 8){
+//     unsigned ch = (unsigned char)*s;
+//     if (ch < 32 || ch > 126) continue;  /* Basic Latin printable */
+
+// #if SGFX_HAVE_FONT8X8
+//     /* font8x8_basic: row-major, LSB = leftmost */
+//     const uint8_t* glyph = font8x8_basic[ch];
+//     for (int row=0; row<8; ++row){
+//       uint8_t bits = glyph[row];
+//       for (int col=0; col<8; ++col){
+//         if (bits & (uint8_t)(1u << col))
+//           sgfx_draw_pixel(d, cx+col, y+row, c);
+//       }
+//     }
+// #else
+//     /* Internal subset: row-major, MSB = leftmost (your original convention) */
+//     const uint8_t* glyph = sgfx_font8x8_basic_subset[ch-32];
+//     for (int row=0; row<8; ++row){
+//       uint8_t bits = glyph[row];
+//       for (int col=0; col<8; ++col){
+//         if (bits & (uint8_t)(1u << (7-col)))
+//           sgfx_draw_pixel(d, cx+col, y+row, c);
+//       }
+//     }
+// #endif
+//   }
+//   return SGFX_OK;
+// }
+
 /* Optional size helpers */
 static inline int sgfx_text8x8_width(const char* s, int sx){
   if (!s || sx<=0) return 0;
@@ -403,6 +436,41 @@ static void render_5x7_from_8x8(sgfx_device_t* d, int x,int y, char ch, sgfx_rgb
   (void)d; (void)x; (void)y; (void)ch; (void)c;
 #endif
 }
+
+// /* Strict per-pixel 5x7 draw with fallback */
+// int sgfx_text5x7(sgfx_device_t* d, int x, int y, const char* s, sgfx_rgba8_t c){
+//   if (!s) return SGFX_ERR_INVAL;
+
+//   int cx = x;
+//   for (; *s; ++s, cx += 6){
+//     unsigned char ch = (unsigned char)*s;
+
+//     /* Normalize: we keep printable ASCII only */
+//     if (ch < 32 || ch > 126) continue;
+
+//     int idx = find5x7((char)ch);
+//     if (idx >= 0){
+//       const uint8_t* col = sgfx_font5x7_glyphs[idx].col;
+//       for (int i=0;i<5;++i){
+//         uint8_t cb = col[i];
+//         while (cb){
+//           int row = __builtin_ctz(cb);      /* topmost set bit (0..6) */
+//           sgfx_draw_pixel(d, cx+i, y+row, c);
+//           cb &= (uint8_t)(cb-1);
+//         }
+//       }
+//     } else {
+//       /* Not in sparse table → use 8x8 crop if available, else draw a box. */
+// #if SGFX_HAVE_FONT8X8
+//       render_5x7_from_8x8(d, cx, y, (char)ch, c);
+// #else
+//       /* fallback box glyph */
+//       sgfx_draw_rect(d, cx, y, 5, 7, c);
+// #endif
+//     }
+//   }
+//   return SGFX_OK;
+// }
 
 int sgfx_text5x7_scaled(sgfx_device_t* d, int x, int y,
                         const char* s, sgfx_rgba8_t c,

@@ -1,3 +1,4 @@
+
 #pragma once
 /* sgfx_port.h — glue that reads PlatformIO build flags and constructs the bus+driver */
 #include "sgfx.h"
@@ -85,22 +86,4 @@ static inline int sgfx_autoinit(sgfx_device_t* dev, void* scratch, size_t scratc
   int rc = sgfx_init(dev, &bus, SGFX__DRV_OPS, &caps, scratch, scratch_len);
   if (!rc) sgfx_set_rotation(dev, SGFX_ROT);
   return rc;
-}
-
-/* ===== MONO SUPPORT (SSD1306/SH1106/etc.) ===== */
-#ifndef SGFX_MONO_INVERT
-#define SGFX_MONO_INVERT 0
-#endif
-
-/* Convert RGBA8 to a 1-bit luminance with alpha thresholding. */
-static inline uint8_t sgfx_mono_from_rgba(sgfx_rgba8_t c) {
-  if (c.a < 128) return 0;  // transparent => OFF
-  /* Rec.709-ish luma: Y ≈ 0.2126 R + 0.7152 G + 0.0722 B
-     Using integer math scaled to 256: 54, 183, 18 */
-  uint16_t y = (uint16_t)(54 * (uint16_t)c.r + 183 * (uint16_t)c.g + 18 * (uint16_t)c.b) >> 8;
-  uint8_t on = (y >= 128) ? 1 : 0;
-#if SGFX_MONO_INVERT
-  on ^= 1;
-#endif
-  return on;
 }

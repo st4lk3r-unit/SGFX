@@ -153,17 +153,8 @@ static int ssd_fill_rect(sgfx_device_t* d, int x,int y,int w,int h, sgfx_rgba8_t
   if (y1 >= s.h)  y1 = s.h - 1;
   if (x1 < x0 || y1 < y0) return SGFX_OK;
 
-uint16_t luma = (uint16_t)(( (uint16_t)54  * (uint16_t)c.r
-                           + (uint16_t)183 * (uint16_t)c.g
-                           + (uint16_t)18  * (uint16_t)c.b) >> 8);
-int set_on = (c.a >= 128) && (luma >= 128);
-#ifdef SGFX_MONO_INVERT
-set_on = !set_on;
-#endif
-
-#ifdef SGFX_MONO_INVERT
-  set_on = !set_on;
-#endif
+  /* on = any nonzero RGB -> set bits; black -> clear bits */
+  const int set_on = (c.r | c.g | c.b) != 0;
 
   const int page_start = y0 >> 3;
   const int page_end   = y1 >> 3;

@@ -1,183 +1,203 @@
 #ifdef SGFX_DRV_ST7796
 
 #include "sgfx.h"
+#include "st77xx_common.h"
 #include "sgfx_port.h"
 #include <stdint.h>
-#include <string.h>
+#include <stdlib.h>
+#include <stdbool.h>
 
-#ifndef SGFX_BUS_SPI
-# error "ST7796 driver requires SPI: define SGFX_BUS_SPI"
-#endif
+// forward declaration to satisfy ops initializer
+static int st_invert(sgfx_device_t* d, bool on);
 
-/* ======= Tunables via build flags (safe defaults) ======= */
-#ifndef SGFX_ST7796_BGR
-# define SGFX_ST7796_BGR 1      /* many modules are BGR */
+
+/* ==== Driver flag mapping (make per-driver flags usable as defaults) ==== */
+#ifdef SGFX_ST7796_BGR
+#  undef  SGFX_DEFAULT_BGR_ORDER
+#  define SGFX_DEFAULT_BGR_ORDER SGFX_ST7796_BGR
 #endif
-#ifndef SGFX_ST7796_INVERT
-# define SGFX_ST7796_INVERT 0   /* flip to 1 if colors look 'negative' */
-#endif
-#ifndef SGFX_ST7796_COLSTART
-# define SGFX_ST7796_COLSTART 0 /* adjust if you see margins */
-#endif
-#ifndef SGFX_ST7796_ROWSTART
-# define SGFX_ST7796_ROWSTART 0
-#endif
-#ifndef SGFX_ST7796_INIT_DELAY_MS
-# define SGFX_ST7796_INIT_DELAY_MS 120
+#ifdef SGFX_ST7796_INVERT
+#  undef  SGFX_DEFAULT_INVERT
+#  define SGFX_DEFAULT_INVERT SGFX_ST7796_INVERT
 #endif
 
-/* ======= ST7796 command set (subset) ======= */
-#define ST_CMD_SWRESET  0x01
-#define ST_CMD_SLPIN    0x10
-#define ST_CMD_SLPOUT   0x11
-#define ST_CMD_NORON    0x13
-#define ST_CMD_INVOFF   0x20
-#define ST_CMD_INVON    0x21
-#define ST_CMD_DISPOFF  0x28
-#define ST_CMD_DISPON   0x29
-#define ST_CMD_CASET    0x2A
-#define ST_CMD_RASET    0x2B
-#define ST_CMD_RAMWR    0x2C
-#define ST_CMD_MADCTL   0x36
-#define ST_CMD_COLMOD   0x3A
+/* ========== ST77xx Commands (subset used) ========== */
+#define ST77_SWRESET   0x01
+#define ST77_SLPIN     0x10
+#define ST77_SLPOUT    0x11
+#define ST77_INVOFF    0x20
+#define ST77_INVON     0x21
+#define ST77_DISPON    0x29
+#define ST77_CASET     0x2A
+#define ST77_RASET     0x2B
+#define ST77_RAMWR     0x2C
+#define ST77_MADCTL    0x36
+#define ST77_COLMOD    0x3A
 
-/* MADCTL bits */
-#define MADCTL_MY  0x80
-#define MADCTL_MX  0x40
-#define MADCTL_MV  0x20
-#define MADCTL_BGR 0x08
-
-/* ======= HAL hooks provided by sgfx_port ======= */
-#ifndef sgfx_cmd8
-  extern int  sgfx_cmd8 (sgfx_device_t*, uint8_t cmd);
+/* ========== Offsets (alias common macros) ========== */
+#ifndef SGFX_ST77XX_XOFF
+# ifdef SGFX_ST7796_COLSTART
+#  define SGFX_ST77XX_XOFF SGFX_ST7796_COLSTART
+# else
+#  define SGFX_ST77XX_XOFF 0
+# endif
 #endif
-#ifndef sgfx_cmdn
-  extern int  sgfx_cmdn (sgfx_device_t*, uint8_t cmd, const uint8_t* data, size_t n);
-#endif
-#ifndef sgfx_data
-  extern int  sgfx_data (sgfx_device_t*, const void* bytes, size_t n);
-#endif
-#ifndef sgfx_delay_ms
-  extern void sgfx_delay_ms(uint32_t ms);
+#ifndef SGFX_ST77XX_YOFF
+# ifdef SGFX_ST7796_ROWSTART
+#  define SGFX_ST77XX_YOFF SGFX_ST7796_ROWSTART
+# else
+#  define SGFX_ST77XX_YOFF 0
+# endif
 #endif
 
-/* ======= Helpers ======= */
+/* ========== Private state ========== */
+typedef struct {
+  uint16_t xoff_portrait;
+  uint16_t yoff_portrait;
+  uint8_t  rotation;
+  uint8_t  bgr;
+} st_priv_t;
+
+/* ========== Small helpers ========== */
+static int st_send(sgfx_device_t* d, uint8_t cmd, const void* data, size_t n){
+  if (d->bus->ops->write_cmd(d->bus, cmd)) return -1;
+  if (n && data) return d->bus->ops->write_data(d->bus, data, n);
+  return 0;
+}
 static inline uint16_t pack565(sgfx_rgba8_t c){
-  return (uint16_t)(((c.r & 0xF8)<<8) | ((c.g & 0xFC)<<3) | (c.b >> 3));
+  return (uint16_t)(((c.r & 0xF8) << 8) | ((c.g & 0xFC) << 3) | (c.b >> 3));
 }
 
-/* Offsets swap on 90°/270° (MV) rotations */
-static inline void st7796_get_ofs(uint8_t rot, uint16_t* xofs, uint16_t* yofs){
-  uint16_t cs = (uint16_t)SGFX_ST7796_COLSTART;
-  uint16_t rs = (uint16_t)SGFX_ST7796_ROWSTART;
-  if (rot & 1){ *xofs = rs; *yofs = cs; } else { *xofs = cs; *yofs = rs; }
+/* ========== Rotation/offset handling ========== */
+static void st_offsets_for(st_priv_t* p, uint8_t rot, uint16_t* xo, uint16_t* yo){
+  if ((rot & 1) == 0) { *xo = p->xoff_portrait; *yo = p->yoff_portrait; }
+  else { *xo = p->yoff_portrait; *yo = p->xoff_portrait; }
 }
 
-/* ======= Ops ======= */
+/* ========== Driver ops ========== */
+static int st_init(sgfx_device_t* d){
+  st_priv_t* p = (st_priv_t*)calloc(1, sizeof(*p));
+  if (!p) return SGFX_ERR_NOMEM;
+  d->scratch = p;
 
-static int st7796_set_rotation(sgfx_device_t* d, uint8_t rot){
-  rot &= 3;
-  uint8_t mad = 0;
-  if (SGFX_ST7796_BGR) mad |= MADCTL_BGR;
+  p->xoff_portrait = (uint16_t)SGFX_ST77XX_XOFF;
+  p->yoff_portrait = (uint16_t)SGFX_ST77XX_YOFF;
+  p->bgr = (uint8_t)(
+  #ifdef SGFX_DEFAULT_BGR_ORDER
+    SGFX_DEFAULT_BGR_ORDER
+  #else
+    0
+  #endif
+  );
 
-  /* Common mapping used by most ST77xx/ILI9xxx families */
-  switch (rot){
-    case 0: mad |= (MADCTL_MX | MADCTL_MY); break;  /* portrait */
-    case 1: mad |= (MADCTL_MY | MADCTL_MV); break;  /* landscape 90° */
-    case 2: mad |= (0);                    break;   /* portrait 180° */
-    case 3: mad |= (MADCTL_MX | MADCTL_MV); break;  /* landscape 270° */
-  }
-  return sgfx_cmdn(d, ST_CMD_MADCTL, &mad, 1);
-}
+  if (st_send(d, ST77_SWRESET, NULL, 0)) return -1;
+  if (d->bus->ops->delay_ms) d->bus->ops->delay_ms(d->bus, 5);
+  if (st_send(d, ST77_SLPOUT, NULL, 0)) return -1;
+  if (d->bus->ops->delay_ms) d->bus->ops->delay_ms(d->bus, 120);
 
-static int st7796_set_window(sgfx_device_t* d, int x,int y,int w,int h){
-  uint16_t xo, yo;
-  st7796_get_ofs(d->rotation & 3, &xo, &yo);
+  { uint8_t v = 0x55; if (st_send(d, ST77_COLMOD, &v, 1)) return -1; } // 16-bit
+  uint8_t mad = st77xx_madctl_for(0, p->bgr);
+  if (st_send(d, ST77_MADCTL, &mad, 1)) return -1;
 
-  uint16_t x0 = (uint16_t)x + xo;
-  uint16_t y0 = (uint16_t)y + yo;
-  uint16_t x1 = (uint16_t)(x + w - 1) + xo;
-  uint16_t y1 = (uint16_t)(y + h - 1) + yo;
-
-  uint8_t ca[4] = { (uint8_t)(x0>>8), (uint8_t)x0, (uint8_t)(x1>>8), (uint8_t)x1 };
-  uint8_t ra[4] = { (uint8_t)(y0>>8), (uint8_t)y0, (uint8_t)(y1>>8), (uint8_t)y1 };
-
-  int rc = sgfx_cmdn(d, ST_CMD_CASET, ca, 4); if (rc) return rc;
-  rc = sgfx_cmdn(d, ST_CMD_RASET, ra, 4);     if (rc) return rc;
-  rc = sgfx_cmd8(d, ST_CMD_RAMWR);            if (rc) return rc;
-  return SGFX_OK;
-}
-
-static int st7796_write_pixels(sgfx_device_t* d, const void* src, size_t count, sgfx_pixfmt_t fmt){
-  if (fmt != SGFX_FMT_RGB565) return SGFX_ERR_NOSUP; /* stream RGB565 only */
-  return sgfx_data(d, src, count * 2u);
-}
-
-static int st7796_fill_rect(sgfx_device_t* d, int x,int y,int w,int h, sgfx_rgba8_t c){
-  int rc = st7796_set_window(d, x,y,w,h);
-  if (rc) return rc;
-
-  size_t total = (size_t)w * (size_t)h;
-  size_t maxpx = d->scratch_bytes / 2;
-  if (!maxpx) return SGFX_ERR_NOMEM;
-
-  uint16_t* buf = (uint16_t*)d->scratch;
-  uint16_t p = pack565(c);
-  for (size_t i=0;i<maxpx;++i) buf[i] = p;
-
-  while (total){
-    size_t n = (total > maxpx) ? maxpx : total;
-    rc = sgfx_data(d, buf, n * 2u);
-    if (rc) return rc;
-    total -= n;
-  }
-  return SGFX_OK;
-}
-
-static int st7796_present(sgfx_device_t* d){
-  (void)d; return SGFX_OK; /* streaming TFT */
-}
-
-static int st7796_init(sgfx_device_t* d){
-  int rc = sgfx_cmd8(d, ST_CMD_SWRESET); if (rc) return rc;
-  sgfx_delay_ms(5);
-
-  rc = sgfx_cmd8(d, ST_CMD_SLPOUT);      if (rc) return rc;
-  sgfx_delay_ms(SGFX_ST7796_INIT_DELAY_MS);
-
-  /* 16-bit color */
-  { uint8_t v = 0x55; rc = sgfx_cmdn(d, ST_CMD_COLMOD, &v, 1); if (rc) return rc; }
-
-  /* Apply build-time rotation (stored in d->rotation by core) */
-  rc = st7796_set_rotation(d, d->rotation & 3); if (rc) return rc;
-
-  /* Optional display inversion */
-#if SGFX_ST7796_INVERT
-  rc = sgfx_cmd8(d, ST_CMD_INVON);  if (rc) return rc;
-#else
-  rc = sgfx_cmd8(d, ST_CMD_INVOFF); if (rc) return rc;
+#ifdef SGFX_DEFAULT_INVERT
+  if (SGFX_DEFAULT_INVERT) { if (st_send(d, ST77_INVON, NULL, 0)) return -1; }
+  else { if (st_send(d, ST77_INVOFF, NULL, 0)) return -1; }
 #endif
-
-  rc = sgfx_cmd8(d, ST_CMD_NORON);  if (rc) return rc; sgfx_delay_ms(10);
-  rc = sgfx_cmd8(d, ST_CMD_DISPON); if (rc) return rc; sgfx_delay_ms(10);
-  return SGFX_OK;
+  if (st_send(d, ST77_DISPON, NULL, 0)) return -1;
+  if (d->bus->ops->delay_ms) d->bus->ops->delay_ms(d->bus, 10);
+  return 0;
 }
 
-/* ======= Public symbols ======= */
 
-const sgfx_caps_t sgfx_st7796_caps = {
-  .width  = SGFX_W,
-  .height = SGFX_H,
-  /* add caps flags if your sgfx_caps_t defines them (e.g., .caps = SGFX_CAP_COLOR|SGFX_CAP_RGB565) */
+static int st_set_rotation(sgfx_device_t* d, uint8_t rot){
+  st_priv_t* p = (st_priv_t*)d->scratch;
+  p->rotation = (rot & 3);
+  uint8_t mad = st77xx_madctl_for(p->rotation, p->bgr);
+  /* Optional extra mirroring */
+#ifdef SGFX_ST7796_MIRROR_Y
+  if (SGFX_ST7796_MIRROR_Y) mad |= MADCTL_MY;
+#endif
+#ifdef SGFX_ST7796_MIRROR_X
+  if (SGFX_ST7796_MIRROR_X) mad |= MADCTL_MX;
+#endif
+  return st_send(d, ST77_MADCTL, &mad, 1);
+}
+static int st_set_window(sgfx_device_t* d, int x, int y, int w, int h){
+  st_priv_t* p = (st_priv_t*)d->scratch;
+  uint16_t xo, yo; st_offsets_for(p, p->rotation, &xo, &yo);
+  uint16_t x0 = (uint16_t)(x + xo);
+  uint16_t y0 = (uint16_t)(y + yo);
+  uint16_t x1 = (uint16_t)(x + w - 1 + xo);
+  uint16_t y1 = (uint16_t)(y + h - 1 + yo);
+
+  uint8_t buf[4];
+  buf[0] = (uint8_t)(x0 >> 8); buf[1] = (uint8_t)(x0 & 0xFF);
+  buf[2] = (uint8_t)(x1 >> 8); buf[3] = (uint8_t)(x1 & 0xFF);
+  if (st_send(d, ST77_CASET, buf, 4)) return -1;
+
+  buf[0] = (uint8_t)(y0 >> 8); buf[1] = (uint8_t)(y0 & 0xFF);
+  buf[2] = (uint8_t)(y1 >> 8); buf[3] = (uint8_t)(y1 & 0xFF);
+  if (st_send(d, ST77_RASET, buf, 4)) return -1;
+
+  return st_send(d, ST77_RAMWR, NULL, 0);
+}
+
+static int st_write_pixels(sgfx_device_t* d, const void* px, size_t count, sgfx_pixfmt_t src_fmt){
+  if (src_fmt == SGFX_FMT_RGB565 && d->bus->ops->write_pixels)
+    return d->bus->ops->write_pixels(d->bus, px, count, src_fmt);
+  size_t bytes = (src_fmt == SGFX_FMT_RGB565) ? count * 2 : count;
+  return d->bus->ops->write_data(d->bus, px, bytes);
+}
+
+static int st_fill_rect(sgfx_device_t* d, int x, int y, int w, int h, sgfx_rgba8_t c){
+  if (w <= 0 || h <= 0) return 0;
+  if (st_set_window(d, x, y, w, h)) return -1;
+
+  uint16_t p = pack565(c);
+  if (d->bus->ops->write_repeat)
+    return d->bus->ops->write_repeat(d->bus, &p, sizeof(p), (size_t)w * (size_t)h);
+
+  enum { CHUNK = 128 };
+  uint16_t tmp[CHUNK];
+  for (int i=0;i<CHUNK;++i) tmp[i]=p;
+  size_t left = (size_t)w * (size_t)h;
+  while (left){
+    size_t n = left > CHUNK ? CHUNK : left;
+    int rc = d->bus->ops->write_data(d->bus, tmp, n*2);
+    if (rc) return rc;
+    left -= n;
+  }
+  return 0;
+}
+
+static int st_present(sgfx_device_t* d){
+  (void)d; return 0; // no-op for now
+}
+
+static const sgfx_caps_t st_caps = {
+  .width  = 320,
+  .height = 480,
 };
+
+const sgfx_caps_t sgfx_st7796_caps = { .width = 320, .height = 480, .native_fmt = SGFX_FMT_RGB565, .bpp = 16, .caps = 0 };
 
 const sgfx_driver_ops_t sgfx_st7796_ops = {
-  .init         = st7796_init,
-  .set_window   = st7796_set_window,
-  .write_pixels = st7796_write_pixels,
-  .fill_rect    = st7796_fill_rect,
-  .present      = st7796_present,
-  .set_rotation = st7796_set_rotation,
+  .init         = st_init,
+  .set_window   = st_set_window,
+  .write_pixels = st_write_pixels,
+  .fill_rect    = st_fill_rect,
+  .present      = st_present,
+  .set_rotation = st_set_rotation,
+  .power        = NULL,
+  .invert       = st_invert,
+  .brightness   = NULL,
 };
 
+// runtime invert support
+static int st_invert(sgfx_device_t* d, bool on){
+    const uint8_t cmd = on ? ST77_INVON : ST77_INVOFF;
+    return st_send(d, cmd, NULL, 0);
+}
+
 #endif /* SGFX_DRV_ST7796 */
+

@@ -1,3 +1,4 @@
+
 #pragma once
 /*
  * SGFX — st4lk3r GFX: MCU-agnostic, module-agnostic tiny C99 graphics core
@@ -6,6 +7,19 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+
+// ---------- Logging (no-op by default) ----------
+#ifndef SGFX_LOG
+# define SGFX_LOG(...) do{}while(0)
+#endif
+
+// Optional compile-time config header hook
+#ifdef SGFX_USE_CONFIG_H
+# include "sgfx_config.h"
+#endif
+typedef struct sgfx_hal_cfg_spi sgfx_hal_cfg_spi_t;
+typedef struct sgfx_hal_cfg_i2c sgfx_hal_cfg_i2c_t;
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -106,6 +120,7 @@ struct sgfx_device {
   size_t                   scratch_bytes;
   sgfx_palette_t           palette;
   uint8_t                  dither;
+  int                      mirror; 
 };
 
 /* ---------- Core API ---------- */
@@ -151,3 +166,16 @@ int sgfx_text8x8_scaled(sgfx_device_t* d, int x, int y,
 #ifdef __cplusplus
 }
 #endif
+
+
+/* ---------- Minimal factory helpers ---------- */
+int sgfx_open_spi(struct sgfx_device* dev,
+                  const sgfx_hal_cfg_spi_t* bus_cfg,
+                  const sgfx_driver_ops_t* drv,
+                  const void* drv_cfg);
+
+int sgfx_open_i2c(struct sgfx_device* dev,
+                  const sgfx_hal_cfg_i2c_t* bus_cfg,
+                  const sgfx_driver_ops_t* drv,
+                  const void* drv_cfg);
+
