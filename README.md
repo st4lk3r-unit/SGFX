@@ -2,370 +2,268 @@
 
 A tiny, **hardware-agnostic** 2D graphics library designed to run on many MCUs (ESP32/S2/S3/C3/C6, RP2040, STM32, nRF52, …) and many display **modules** (SSD1306, ST7789, …) using only **build flags** to switch targets. This README explains how SGFX is built, how to use it, and how to add your own boards, HALs, and drivers.
 
+**Version:** 0.1.3
 
-## Goals
+## Table of Contents
+- [1. Overview](#1-overview)
+- [2. Architecture](#2-architecture)
+- [3. Data Flow](#3-data-flow)
+- [4. Memory Model](#4-memory-model)
+- [5. Configuration](#5-configuration)
+- [6. Board Recipes](#6-board-recipes)
+- [7. Drivers & Panels](#7-drivers--panels)
+- [8. API](#8-api)
+- [9. Error Handling](#9-error-handling)
+- [10. Performance Tuning](#10-performance-tuning)
+- [11. Porting Guide](#11-porting-guide)
+- [12. Troubleshooting](#12-troubleshooting)
 
-- **Agnostic by design**: same app code runs on different MCUs and display modules.
-- **Pluggable layers**: Bus HAL (I2C/SPI), Display Driver (SSD1306/ST77xx/…), and Portable Core.
-- **Tiny memory footprint**: small scratch buffer for staging pixels; optional streaming.
-- **Simple API** for drawing pixels/lines/rects, text, blitting, clipping, rotation.
-- **One demo, many targets**: select target with build flags only.
+## 1. Overview
+SGFX is a small C/C++ graphics core designed for MCUs. You draw into an **RGBA8888** framebuffer; the **presenter** converts and pushes only the parts of the screen that changed. This keeps RAM usage low and makes SPI/I2C panels feel snappy **without** a full display-sized RGB565 buffer.
 
+**Targets**: Arduino, ESP-IDF, STM32 HAL, RP2040
 
-## Architecture Overview
-
-SGFX is split into three layers:
-
-1. **Core** (`core/`): device object, drawing primitives, text, blit helpers.
-2. **Drivers** (`drivers/`): chip-specific implementations (e.g., `ssd1306.c`, `st7789.c`).
-3. **HAL (Bus)** (`hal/<platform>/`): MCU/platform-specific I2C/SPI wrappers:
-   - `hal/arduino/*` – generic Arduino (all supported boards)
-   - `hal/espidf/*` – native ESP-IDF
-   - `hal/stm32/*` – STM32Cube/HAL
-   - Add others (nRF, Zephyr, bare-metal) following the same pattern.
-
-Each device at runtime is described by a single `sgfx_device_t` that bundles:
-
-- `caps`: width, height, color depth/format, rotation support, etc.
-- `drv`: pointers to driver ops (set_window, write_pixels, fill_rect, set_rotation, present, …).
-- `bus`: I2C/SPI handle via HAL (ops: begin, write_cmd, write_data, xmit, delay, …).
-- `clip`: current clip rect (honored by all primitives & blits).
-- `scratch`: optional staging buffer (e.g., for RGB565 batching or MONO1 building).
-
-
-## Core API (high level)
-
+**Hello, pixel (minimal loop)**
 ```c
-int sgfx_init(sgfx_device_t* dev, sgfx_bus_t* bus,
-              const sgfx_driver_ops_t* drv, const sgfx_caps_t* caps,
-              void* scratch, size_t scratch_bytes);
-
-/* Device control */
-void sgfx_set_clip(sgfx_device_t* d, sgfx_rect_t r);
-void sgfx_reset_clip(sgfx_device_t* d);
-void sgfx_set_rotation(sgfx_device_t* d, uint8_t rot_0_3);
-void sgfx_set_palette(sgfx_device_t* d, const sgfx_palette_t* pal); /* mono */
-void sgfx_set_dither(sgfx_device_t* d, uint8_t mode);                /* optional */
-int  sgfx_present(sgfx_device_t* d);                                  /* flush */
-
-/* Primitives */
-int sgfx_clear(sgfx_device_t* d, sgfx_rgba8_t color);
-int sgfx_draw_pixel(sgfx_device_t* d, int x,int y, sgfx_rgba8_t c);
-int sgfx_fill_rect(sgfx_device_t* d, int x,int y,int w,int h, sgfx_rgba8_t c);
-int sgfx_draw_rect(sgfx_device_t* d, int x,int y,int w,int h, sgfx_rgba8_t c);
-int sgfx_draw_fast_hline(sgfx_device_t* d, int x,int y,int w, sgfx_rgba8_t c);
-int sgfx_draw_fast_vline(sgfx_device_t* d, int x,int y,int h, sgfx_rgba8_t c);
-
-/* Blit */
-int sgfx_blit(sgfx_device_t* d, int x,int y, int w,int h,
-              sgfx_pixfmt_t src_fmt, const void* pixels, size_t pitch_bytes);
-
-/* Text (built-in) */
-int sgfx_text5x7(sgfx_device_t* d, int x,int y, const char* s, sgfx_rgba8_t c);
-int sgfx_text8x8(sgfx_device_t* d, int x,int y, const char* s, sgfx_rgba8_t c);
-
-/* Text scaling (new) */
-int sgfx_text5x7_scaled(sgfx_device_t* d, int x,int y, const char* s, sgfx_rgba8_t c, int sx,int sy);
-int sgfx_text8x8_scaled(sgfx_device_t* d, int x,int y, const char* s, sgfx_rgba8_t c, int sx,int sy);
-int sgfx_text5x7_width(const char* s, int sx);
-int sgfx_text5x7_height(int sy);
-int sgfx_text8x8_width(const char* s, int sx);
-int sgfx_text8x8_height(int sy);
-```
-
-> **Note**: If you defined `SGFX_HAVE_FONT8X8`, SGFX uses the upstream dhepper 8×8 LSB-left row font. Otherwise it uses a small internal subset or your provided table. For 5×7, SGFX ships a curated ASCII set with fallback to 8×8 crop.
-
-
-## Pixel Formats
-
-- `SGFX_FMT_MONO1` – page-oriented **1bpp** as used by SSD1306 (8 vertical pixels per byte, pitch = panel width in bytes).
-- `SGFX_FMT_RGB565` – 16-bit (5:6:5) packed little-endian per pixel; typical for color drivers (ST77xx).
-
-Drivers advertise their native format via `caps` and translate input if needed (many accept RGB565 and convert internally).
-
-
-## Rotation & Clipping
-
-- Rotation is handled by the **driver** (e.g., ST7789 MADCTL). Use `sgfx_set_rotation(d, 0..3)`.
-- Clipping is done in core and respected by all primitives and blits.
-- The demo includes a rotation sweep and **restores** the build-time rotation afterwards.
-
-
-## Memory Model & Scratch Buffer
-
-- SGFX does not require a full-framebuffer. Most ops stream via `set_window + write_pixels`.
-- Some helpers (clear/fill, RGB565 blit, mono sprite build) use the **scratch buffer** to batch pixels.
-- Configure via `-DSGFX_SCRATCH_BYTES=<N>`. Examples: 1024 for mono displays, 4096 for color.
-
-
-## Building & Selecting Targets
-
-SGFX is intended to be used with **PlatformIO** (Arduino/ESP-IDF/STM32Cube), but it’s portable to other build systems. You switch **MCU** and **Module** with **build flags** only.
-
-### Minimal example environments
-
-```ini
-;- ESP32-S3 + SSD1306 (I2C)-
-[env:esp32s3-ssd1306]
-platform = espressif32
-board = esp32-s3-devkitc-1
-framework = arduino
-build_flags =
-  -DSGFX_BUS_I2C=1
-  -DSGFX_DRV_SSD1306=1
-  -DSGFX_W=128 -DSGFX_H=64 -DSGFX_ROT=0
-  -DSGFX_PIN_SDA=8 -DSGFX_PIN_SCL=9
-  -DSGFX_I2C_ADDR=0x3C -DSGFX_I2C_HZ=400000
-  -DSGFX_HAL_ARDUINO_GENERIC=1
-  -DSGFX_SCRATCH_BYTES=1024
-
-;- ESP32-S3 + ST7789 (SPI 240x135)-
-[env:esp32s3-st7789]
-platform = espressif32
-board = esp32-s3-devkitc-1
-framework = arduino
-build_flags =
-  -DSGFX_BUS_SPI=1
-  -DSGFX_DRV_ST7789=1
-  -DSGFX_W=240 -DSGFX_H=135 -DSGFX_ROT=1
-  -DSGFX_PIN_SCK=36 -DSGFX_PIN_MOSI=35 -DSGFX_PIN_MISO=-1
-  -DSGFX_PIN_CS=37  -DSGFX_PIN_DC=34  -DSGFX_PIN_RST=33 -DSGFX_PIN_BL=38
-  -DSGFX_SPI_HZ=40000000
-  -DSGFX_ST7789_COLSTART=0   ; adjust per module/rotation
-  -DSGFX_ST7789_ROWSTART=52  ; adjust per module/rotation
-  -DSGFX_HAL_ARDUINO_GENERIC=1
-  -DSGFX_SCRATCH_BYTES=4096
-
-;- ESP-IDF + ST7789-
-[env:esp32s3-idf-st7789]
-platform = espressif32
-framework = espidf
-board = esp32-s3-devkitc-1
-build_flags =
-  -DSGFX_BUS_SPI=1
-  -DSGFX_DRV_ST7789=1
-  -DSGFX_W=240 -DSGFX_H=135 -DSGFX_ROT=1
-  -DSGFX_PIN_SCK=36 -DSGFX_PIN_MOSI=35 -DSGFX_PIN_MISO=-1
-  -DSGFX_PIN_CS=37  -DSGFX_PIN_DC=34  -DSGFX_PIN_RST=33 -DSGFX_PIN_BL=38
-  -DSGFX_SPI_HZ=40000000
-  -DSGFX_HAL_ESPIDF=1
-  -DSGFX_SCRATCH_BYTES=4096
-  -DSGFX_IDF_SPI_HOST=SPI2_HOST
-```
-
-> **Tip**: To add a similar **MCU flavor** (ESP32-C3/C6, S2, etc.), copy an env and only change pins and `board` — the demo remains identical.
-
-
-## Quickstart
-
-1. **Add SGFX** to your project (`lib/SGFX` or as a submodule).
-2. Pick an env or create one by setting the HAL, bus, and driver macros.
-3. Include and run the demo:
-
-```cpp
 #include "sgfx.h"
-#include "sgfx_port.h"
 
-static uint8_t scratch[4096];
-static sgfx_device_t dev;
+int main(void) {
+    sgfx_t* g = sgfx_create();
+    if (!g) return -1;
 
-void setup(){
-  sgfx_autoinit(&dev, scratch, sizeof scratch);   // based on build flags
-  sgfx_clear(&dev, (sgfx_rgba8_t){0,0,0,255});
-  sgfx_text5x7(&dev, 2, 2, "Hello SGFX!", (sgfx_rgba8_t){255,255,255,255});
+    sgfx_clear(g, 0xFF202020);                 // RGBA
+    sgfx_fill_rect(g, 10, 10, 50, 30, 0xFFFFCC00);
+    sgfx_present(g);                           // push only dirty tiles
+
+    for (;;) {
+        // ...update what changed...
+        sgfx_present(g);
+    }
 }
 ```
 
-> The **autoinit** helper wires up the right HAL, driver and capabilities using your build flags. You can also call `sgfx_init()` manually if you need custom setup.
+## 2. Architecture
 
+**Layers**
 
-## The Demo (what it showcases)
+* **Core** (`src/core/`): drawing operations, clipping, color utils.
+* **Drivers** (`src/drivers/`): SSD1306, ST77xx family. Each implements a small ops table (init, set-window, write-lines, etc.).
+* **HAL** (`src/hal/`): Thin per-platform bus wrappers for SPI/I2C and pins (Arduino, ESP-IDF, STM32, RP2040).
+* **Presenter** (`src/core/sgfx_present.*`): tile tracking, RGBA→RGB565 conversion, region flush.
 
-- **Intro** with device size/rotation, corner markers
-- **Addressing** grid (center lines + border)
-- **Clipping** (central window)
-- **Rotation sweep** (0..3) and **restore** to build-time rotation
-- **Text scaling** (5×7 and 8×8 with `sx,sy`)
-- **BLIT**: tries `MONO1` then `RGB565`
-- **Color/Mono fills & gradients**
-- **Overlap/merge test** for page-oriented mono
-- **Perf measurement** (avg ms per frame for checker fills)
+**Design goals**
 
-File: `src/main.cpp` (already provided in this repo).
+* Minimal RAM pressure, predictable performance on slow buses.
+* One code path across platforms: switch targets via **defines**.
 
+## 3. Data Flow
 
-## Configuration Macros (Build Flags)
+1. **Create device**: `sgfx_create()` wires bus + driver + presenter based on your defines.
+2. **Draw**: call `sgfx_clear`, `sgfx_fill_rect`, `sgfx_draw_bitmap`, etc. The core marks changed tiles.
+3. **Present**: `sgfx_present()` converts only dirty tiles to **RGB565** (or mono) line buffers and sends them to the driver.
+4. **Repeat**: unchanged areas cost zero bus time.
 
-**Bus selection**
-- `-DSGFX_BUS_I2C=1` or `-DSGFX_BUS_SPI=1`
+**Pixel formats & byte order**
 
-**Driver selection**
-- `-DSGFX_DRV_SSD1306=1` (mono 128×64 typical)
-- `-DSGFX_DRV_ST7789=1` (color 240×240 / 240×135, etc.)
+* **Input FB**: `RGBA8888` (byte order: **R G B A**). Alpha is currently ignored for panel output.
+* **Panel bus**: `RGB565` (5-6-5, MSB-first over SPI). For ST77xx, color order may require `BGR=1`.
 
-**Core/Caps**
-- `-DSGFX_W=<px>` `-DSGFX_H=<px>` `-DSGFX_ROT=<0..3>`
-- `-DSGFX_SCRATCH_BYTES=<bytes>`
+## 4. Memory Model
 
-**Pins & bus speed**
-- I2C: `-DSGFX_PIN_SDA`, `-DSGFX_PIN_SCL`, `-DSGFX_I2C_ADDR`, `-DSGFX_I2C_HZ`
-- SPI: `-DSGFX_PIN_SCK`, `-DSGFX_PIN_MOSI`, `-DSGFX_PIN_MISO`, `-DSGFX_PIN_CS`, `-DSGFX_PIN_DC`, `-DSGFX_PIN_RST`, `-DSGFX_PIN_BL`, `-DSGFX_SPI_HZ`
+* **Framebuffer**: RGBA8888 `4 * W * H` bytes, owned by SGFX (see `sgfx_fb.h`).
+  Tip: on ESP32, place in PSRAM if available.
+* **Line buffer**: temporary RGB565 buffer sized by `2 * max_line_px` bytes.
+* **Tiles**: small metadata per tile for dirty tracking.
 
-**Driver tuning** (examples)
-- ST7789 offsets: `-DSGFX_ST7789_COLSTART=<n>`, `-DSGFX_ST7789_ROWSTART=<n>` (per-module and rotation dependent)
-- ESP-IDF SPI/I2C ports: `-DSGFX_IDF_SPI_HOST=SPI2_HOST`, `-DSGFX_IDF_I2C_PORT=I2C_NUM_0`
+**RAM budgeting examples**
 
-**HAL selection**
-- `-DSGFX_HAL_ARDUINO_GENERIC=1`
-- `-DSGFX_HAL_ESPIDF=1`
-- `-DSGFX_HAL_STM32CUBE=1`
+```
+SSD1306 128×64:    FB = 32 KB,  LB ≈ 512–2048 B (tuned by max_line_px)
+ST7789  240×320:   FB = 300 KB, LB ≈ 480–4096 B
+```
 
-**Demo switches**
-- `-DSGFX_DEMO_FORCE_MONO1` or `-DSGFX_DEMO_FORCE_RGB565`
+**Rotation vs W/H rule**
 
+* Set `SGFX_W/H` to the **logical orientation you will draw in**.
+* Use `SGFX_DEFAULT_ROTATION` to match physical mounting.
+* `SGFX_COLSTART/ROWSTART` (ST77xx) offsets apply to the physical panel and combine with rotation.
+* Many ST77xx boards need `SGFX_DEFAULT_BGR=1`.
 
-## Adding a New Board (same module)
+## 5. Configuration
 
-1. Duplicate a similar env in `platformio.ini`.
-2. Update `board` and **pins** to match your wiring.
-3. Keep the same HAL/driver defines; only bus pins/speed change.
-4. Build/flash the same demo — **no app changes**.
+Pick one bus and one driver, specify panel size, then wire pins & speeds.
 
-**Example (ESP32-C3 + SSD1306)**
+|                 What | Define                                                                        | Values / Notes                          |
+| -------------------: | ----------------------------------------------------------------------------- | --------------------------------------- |
+|                  Bus | `SGFX_BUS_SPI` / `SGFX_BUS_I2C`                                               | pick one                                |
+|               Driver | `SGFX_DRV_*`                                                                  | `SSD1306`, `ST7735`, `ST7789`, `ST7796` |
+|           Panel size | `SGFX_W`, `SGFX_H`                                                            | integers                                |
+|             SPI pins | `SGFX_PIN_SCK`, `SGFX_PIN_MOSI`, `SGFX_PIN_CS`, `SGFX_PIN_DC`, `SGFX_PIN_RST` | required for SPI                        |
+|             I2C pins | `SGFX_PIN_SCL`, `SGFX_PIN_SDA`, `SGFX_I2C_ADDR`                               | required for I2C                        |
+|            SPI speed | `SGFX_SPI_HZ`                                                                 | e.g. `40000000`                         |
+|            I2C speed | `SGFX_I2C_HZ`                                                                 | e.g. `400000`                           |
+|             Rotation | `SGFX_DEFAULT_ROTATION`                                                       | `0..3`                                  |
+| Color order (ST77xx) | `SGFX_DEFAULT_BGR`                                                            | `0=RGB`, `1=BGR`                        |
+|               Invert | `SGFX_DEFAULT_INVERT`                                                         | `0/1`                                   |
+|       ST77xx offsets | `SGFX_COLSTART`, `SGFX_ROWSTART`                                              | module-specific                         |
+
+**Tile & presenter knobs**
+
+* Runtime (if available in your build): `sgfx_opts_t { .max_line_px, .tile_w, .tile_h }` used with `sgfx_create_with(&opts)`.
+* Otherwise: use compile-time defines like `SGFX_TILE_W`, `SGFX_TILE_H`, `SGFX_MAX_LINE_PX` (check your `sgfx_present.*`).
+
+**Build with CMake (example)**
+
+```cmake
+cmake_minimum_required(VERSION 3.16)
+project(sgfx_demo C)
+
+add_library(sgfx
+  ${CMAKE_SOURCE_DIR}/src/core/sgfx_core.c
+  ${CMAKE_SOURCE_DIR}/src/core/sgfx_present.c
+  ${CMAKE_SOURCE_DIR}/src/drivers/sgfx_st77xx.c
+  ${CMAKE_SOURCE_DIR}/src/drivers/sgfx_ssd1306.c
+  # select your HAL files for your platform:
+  ${CMAKE_SOURCE_DIR}/src/hal/espidf/sgfx_hal_spi.c
+)
+target_include_directories(sgfx PUBLIC ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(demo main.c)
+target_link_libraries(demo sgfx)
+target_compile_definitions(demo PUBLIC
+  SGFX_BUS_SPI SGFX_DRV_ST7789 SGFX_W=240 SGFX_H=320
+  SGFX_PIN_SCK=36 SGFX_PIN_MOSI=35 SGFX_PIN_CS=34 SGFX_PIN_DC=33 SGFX_PIN_RST=37
+  SGFX_SPI_HZ=40000000 SGFX_DEFAULT_BGR=1)
+```
+
+## 6. Board Recipes
+
+### ESP32-S3 + ST7789 240×320 (SPI)
+
 ```ini
-[env:esp32c3-ssd1306]
-platform = espressif32
-board = esp32-c3-devkitm-1
-framework = arduino
-build_flags =
-  -DSGFX_BUS_I2C=1
-  -DSGFX_DRV_SSD1306=1
-  -DSGFX_W=128 -DSGFX_H=64 -DSGFX_ROT=0
-  -DSGFX_PIN_SDA=8 -DSGFX_PIN_SCL=9
-  -DSGFX_I2C_ADDR=0x3C -DSGFX_I2C_HZ=400000
-  -DSGFX_HAL_ARDUINO_GENERIC=1
-  -DSGFX_SCRATCH_BYTES=1024
+-D SGFX_BUS_SPI
+-D SGFX_DRV_ST7789
+-D SGFX_W=240 -D SGFX_H=320
+-D SGFX_PIN_SCK=36 -D SGFX_PIN_MOSI=35 -D SGFX_PIN_CS=34 -D SGFX_PIN_DC=33 -D SGFX_PIN_RST=37
+-D SGFX_SPI_HZ=40000000
+-D SGFX_DEFAULT_ROTATION=0
+-D SGFX_DEFAULT_BGR=1
+-D SGFX_COLSTART=0 -D SGFX_ROWSTART=0
 ```
 
+### RP2040 + SSD1306 128×64 (I2C @ 0x3C)
 
-## Adding a New Module (same MCU)
+```ini
+-D SGFX_BUS_I2C
+-D SGFX_DRV_SSD1306
+-D SGFX_W=128 -D SGFX_H=64
+-D SGFX_PIN_SCL=5 -D SGFX_PIN_SDA=4
+-D SGFX_I2C_ADDR=0x3C
+-D SGFX_I2C_HZ=400000
+```
 
-You’ll usually only change **driver** flags and dimensions:
+### STM32F103 + ST7735 160×128 (SPI)
 
-1. Pick/implement the driver (`-DSGFX_DRV_…`).
-2. Set `SGFX_W/H/ROT`. For ST7789 *240×135*, common landscape `ROT=1`.
-3. Set SPI pins and `SGFX_SPI_HZ` (32–80 MHz depending on MCU/board).
-4. **Offsets (ST7789)**: many breakout boards and devkits require column/row start offsets. Provide
-   `SGFX_ST7789_COLSTART` / `ROWSTART`. Values vary by vendor and by rotation; consult your module’s reference or vendor library.
+```ini
+-D SGFX_BUS_SPI
+-D SGFX_DRV_ST7735
+-D SGFX_W=160 -D SGFX_H=128
+-D SGFX_PIN_SCK=13 -D SGFX_PIN_MOSI=15 -D SGFX_PIN_CS=12 -D SGFX_PIN_DC=11 -D SGFX_PIN_RST=10
+-D SGFX_SPI_HZ=24000000
+-D SGFX_DEFAULT_ROTATION=1
+-D SGFX_DEFAULT_BGR=0
+-D SGFX_COLSTART=0 -D SGFX_ROWSTART=0
+```
 
+## 7. Drivers & Panels
 
-## Writing a New HAL (Bus Backend)
+### Capabilities
 
-Implement the small set of bus ops used by drivers:
+| Driver  | Color  | Max typical res | Rotation | Invert | BGR | Notes                        |
+| ------- | ------ | --------------- | -------: | -----: | --: | ---------------------------- |
+| SSD1306 | mono   | 128×64          |     0..3 |    yes | n/a | I2C/SPI variants             |
+| ST7735  | 16-bit | 160×128         |     0..3 |    yes | yes | red/green tab offsets differ |
+| ST7789  | 16-bit | 240×320         |     0..3 |    yes | yes | many boards need `BGR=1`     |
+| ST7796  | 16-bit | 320×480         |     0..3 |    yes | yes | larger buffers help          |
+
+### ST77xx Offsets (common modules)
+
+| Module label     | COLSTART | ROWSTART | Notes             |
+| ---------------- | -------: | -------: | ----------------- |
+| ST7735 red tab   |        0 |        0 | some clones vary  |
+| ST7735 green tab |        2 |        1 |                   |
+| ST7789 240×320   |        0 |        0 | many need `BGR=1` |
+| ST7796 320×480   |        0 |        0 |                   |
+
+## 8. API
 
 ```c
-typedef struct {
-  int  (*begin)(sgfx_bus_t*);
-  int  (*i2c_write)(sgfx_bus_t*, uint8_t addr, const uint8_t* bytes, size_t n);
-  int  (*spi_begin_tx)(sgfx_bus_t*);        // assert CS, set DC=cmd/data
-  int  (*spi_end_tx)(sgfx_bus_t*);
-  int  (*spi_write)(sgfx_bus_t*, const uint8_t* bytes, size_t n);
-  void (*pin_mode)(int pin, int mode);
-  void (*pin_write)(int pin, int level);
-  void (*delay_ms)(uint32_t ms);
-} sgfx_bus_ops_t;
+// create a device (bus + driver + fb + presenter wired by defines/macros)
+sgfx_t* sgfx_create(void);
+// optionally: sgfx_t* sgfx_create_with(const sgfx_opts_t* opts); // if available
+
+// draw
+int sgfx_clear(sgfx_t*, uint32_t rgba);
+int sgfx_fill_rect(sgfx_t*, int x, int y, int w, int h, uint32_t rgba);
+int sgfx_draw_bitmap(sgfx_t*, int x, int y, const uint8_t* rgba, int w, int h);
+
+// present (push dirty tiles)
+int sgfx_present(sgfx_t*);
+
+// destroy
+void sgfx_destroy(sgfx_t*);
 ```
 
-Then create `sgfx_bus_t` that stores pins, frequency, and a pointer to these ops. See `hal/arduino/arduino_spi.cpp` and `hal/arduino/arduino_i2c.cpp` for a compact reference (avoid using board-specific constants like `VSPI` directly; use default `SPI` unless a host macro is provided).
+## 9. Error Handling
 
+All functions return `SGFX_OK` (0) or a negative error:
 
-## Writing a New Driver
+* `SGFX_ERR_PARAM`: invalid width/height/pins or bad arguments
+* `SGFX_ERR_BUS`: I/O failure on SPI/I2C
+* `SGFX_ERR_NOSUP`: feature not supported by the selected driver
+* `SGFX_ERR_STATE`: wrong call order or not initialized
 
-Implement `sgfx_driver_ops_t` for your chip:
+**Enable logs**
 
 ```c
-typedef struct {
-  int (*init)(sgfx_device_t*);
-  int (*set_window)(sgfx_device_t*, int x,int y,int w,int h);
-  int (*write_pixels)(sgfx_device_t*, const void* src, size_t count, sgfx_pixfmt_t fmt);
-  int (*fill_rect)(sgfx_device_t*, int x,int y,int w,int h, sgfx_rgba8_t c); // optional fast path
-  int (*present)(sgfx_device_t*);                   // optional
-  int (*set_rotation)(sgfx_device_t*, uint8_t rot); // optional
-} sgfx_driver_ops_t;
+#define SGFX_LOG_DEBUG 1
+#include "sgfx.h"
 ```
 
-Driver responsibilities:
+Then check init and bus prints from HAL/driver. Print return codes on failure paths.
 
-- **Reset & init sequence**: power/reset, sleep out, color mode, MADCTL, CA/RA (column/row), frame rate.
-- **Rotation**: translate 0..3 to the chip’s memory access control; adjust column/row offset if the panel is not full-frame.
-- **Windowing & streaming**: implement `set_window()` → chip `CASET/RASET` (or equivalent), and stream with `write_pixels()`.
-- **Pixel conversion**: accept `SGFX_FMT_MONO1`/`RGB565` as appropriate. For MONO1, pack to controller’s expected order.
-- **present()**: only needed for buffered drivers (e.g., some OLED modes). For streaming TFTs, return `SGFX_OK`.
+## 10. Performance Tuning
 
-**Example notes**:
-- **SSD1306**: page-oriented 1bpp; use `MONO1` buffers (pitch=W). Clip-aware writes update only the needed pages/bits.
-- **ST7789**: color TFT. Pay attention to: `COLSTART/ROWSTART` macros, `MADCTL` bits for rotation & RGB/BGR, and display size (240×240 vs 240×135). Provide fast `fill_rect` by streaming repeated RGB565 without per-pixel overhead.
+**SPI/I2C electrical defaults**
 
+* SPI: **MODE0**, MSB-first. Start ~24 MHz; many ST7789 tolerate up to **40 MHz** on ESP32-S3.
+* I2C: **100–400 kHz**. Common SSD1306 addresses: **0x3C/0x3D**.
+* Backlight (ST77xx **BL/LED**): user-controlled unless your HAL exposes a pin define.
 
-## Text Rendering
+**Heuristics**
 
-- **5×7**: compact column-major font with strict per-pixel plotting, plus **scaled** versions via `sgfx_text5x7_scaled(d,x,y,s,c,sx,sy)`.
-- **8×8**: row-major LSB-left (dhepper) or internal subset. Scaled via `sgfx_text8x8_scaled`.
-- **Layout helpers**: `*_width()` and `*_height()` return pixel sizes for a string at a given scale.
-- **Opaque text** (optional): fill the glyph cell (`5*sx×7*sy` or `8*sx×8*sy`) before plotting; easy to add if needed.
+* **Tile size**: larger tiles reduce per-tile overhead; smaller tiles reduce overdraw (good for I2C).
+* **max_line_px**: bigger → faster but more RAM; aim for panel width on SPI, ~½ on I2C.
+* **DMA/alignment**: some MCUs prefer 4-byte aligned buffers for SPI DMA.
+* **Avoid full clears**: draw only changed regions, then `sgfx_present()`.
 
+## 11. Porting Guide
 
-## Performance Tips
+To add a new platform/RTOS:
 
-- Increase `SGFX_SPI_HZ` where safe (40–80 MHz on many ESP32 boards; 32–36 MHz on some STM32 bluepill setups).
-- Use the driver’s **fast `fill_rect`** path for large areas.
-- Batch writes: core uses `scratch` to chunk `write_pixels()`; set `SGFX_SCRATCH_BYTES` accordingly.
-- Reduce per-call overhead by minimizing `set_window()` changes (draw in tiles/stripes when possible).
+1. Implement a HAL with SPI/I2C send, GPIO set/clear, delay.
+2. Provide pin/speed mapping from defines (`SGFX_PIN_*`, `SGFX_*_HZ`).
+3. Ensure `sgfx_create()` selects your HAL via `#if` on platform macros.
+4. Build a tiny example that toggles a pixel and presents.
 
+**Multiple displays**
 
-## Troubleshooting
+* If your build is per-instance (no global state), multiple `sgfx_t*` may work; otherwise assume **one display per process**.
 
-- **`VSPI not declared` on ESP32-S3**: do not hardcode `VSPI`. The Arduino HAL should use `SPI` (or accept an override like `-DSGFX_ARDUINO_SPI_HOST=<n>`). The provided Arduino HAL does this already; update older sketches.
-- **Wrong offsets on ST7789 (e.g., Cardputer/odd resolutions)**: set `SGFX_ST7789_COLSTART/ROWSTART` (and confirm after rotation). Vendor libraries often publish the offsets; values vary between v1.0/v1.1/ADV or different board batches.
-- **Mono sprite looks scrambled**: confirm your MONO1 source buffer is **page-oriented** (8 rows/byte, pitch = panel width). SGFX’s helper shows how to build such a buffer.
-- **Text mirrored** using external 8×8 fonts: dhepper table is **LSB-left** per row. If your renderer expects MSB-left, reverse bits per row or use the provided converted header.
-- **No output**: check power/BL pin, reset wiring, and correct I2C address/SPI pins. Try lower bus speeds to rule out SI issues.
+## 12. Troubleshooting
 
-
-## Directory Layout (suggested)
-
-```
-lib/SGFX/
-  include/sgfx.h            # public API
-  include/sgfx_port.h       # per-platform glue helpers & autoinit
-  src/core/...
-  src/drivers/ssd1306.c
-  src/drivers/st7789.c
-  src/hal/arduino/...
-  src/hal/espidf/...
-  src/hal/stm32/...
-  examples/demo_universal/  # the featured demo
-```
-
-## Appendix A – ST7789 Offset & Rotation Notes
-
-Many 240×135 modules are mounted with an internal 240×320 controller window, so you must set the visible area start.
-
-- Use `SGFX_ST7789_COLSTART`/`ROWSTART` to align the active 240×135 into the controller’s RAM. The correct values depend on panel wiring and rotation state.
-- After `sgfx_set_rotation()`, the driver may need to swap or adjust these bases. SGFX’s ST7789 driver reads your macros and applies appropriate swaps for `ROT=0..3`.
-
-If you see extra margins on the right/bottom, increase the respective start offset; if content is clipped left/top, decrease it.
-
-
-## Appendix B – MONO1 Buffer Layout (SSD1306-style)
-
-- **Pitch**: `bytes_per_row = panel_width_in_pixels` (because each byte represents a **column** in the current 8-row page).
-- **Indexing**: `buf[page*W + x]` holds bits for rows `page*8 .. page*8+7` at column `x`.
-- Fill as:
-
-```c
-int page = y >> 3; int bit = y & 7; buf[page*W + x] |= (1u << bit);
-```
-
-
-Happy hacking!
+* **White screen / nothing** → check CS/DC/RST; try `SGFX_DEFAULT_BGR=1` (ST77xx)
+* **Offset image** → set `SGFX_COLSTART/ROWSTART`
+* **Tearing/flicker (SPI)** → reduce `SGFX_SPI_HZ` or increase `max_line_px`
+* **I2C lockups** → confirm `SGFX_I2C_ADDR` (0x3C/0x3D); start at 100–400 kHz
+* **Rotated/garbled** → ensure `SGFX_W/H` matches logical orientation; verify rotation & BGR
