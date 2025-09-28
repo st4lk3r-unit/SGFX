@@ -1,75 +1,156 @@
-# SGFX — Agnostic Demo Template (v0.1.3)
+# SGFX Universal Feature Demo
 
-This demo is **MCU-agnostic** and **module-agnostic** as long as your target can build with the Arduino framework.
-You switch targets **only via `build_flags`** in `platformio.ini` — no code edits required.
+A single demo that stress-tests SGFX features on both **mono (SSD1306)** and **color (ST77xx)** panels.  
+It showcases: **text (5×7 & 8×8) with scaling + AA overlay, clipping, rotation sweep (with restore), color/mono-friendly fills & gradients, resilient BLIT (tries MONO1 then RGB565), and a simple perf HUD (FPS).**
 
-## How it works
-- `lib/SGFX/` contains the graphics core, an Arduino-generic HAL (`lib/SGFX/src/hal/arduino`), and example drivers (`ssd1306`, `st7789`, `st7735`, `st7796`).
-- `include/sgfx_port.h` reads **PlatformIO `-D` flags** and constructs the correct bus (I2C/SPI) + driver automatically.
-- `src/main.cpp` calls `sgfx_autoinit(...)` once; everything else is purely flags and pins.
+## 1) What the demo does (scenes)
 
-## Quick start
-Pick an env in `platformio.ini` and hit build/upload. Examples:
-- `env:esp32-ssd1306` — ESP32 Devkit + 128x64 SSD1306 on I2C.
-- `env:esp32-st7789` — ESP32 Devkit + 240x240 ST7789 on SPI.
-- `env:rp2040-ssd1306` — Raspberry Pi Pico + SSD1306 on I2C.
-- `env:rp2040-st7789` — Raspberry Pi Pico + ST7789 on SPI.
-- `env:stm32-bluepill-st7789` — STM32F103 Bluepill + ST7789 on SPI.
+1. **Intro** — Title + resolution/rotation, corner marks.  
+2. **Addressing** — Borders + midlines to verify coordinate origin and addressing.  
+3. **Clipping** — Sets a clip window, draws checker & labels crossing the edges.  
+4. **Rotation sweep** — Renders at rotations 0..3, then **restores** the boot rotation.  
+5. **Text scaling** — 5×7 and 8×8 fonts at multiple scales.  
+6. **BLIT demo** — “Resilient” blit tries **MONO1** first (SSD1306-friendly), then **RGB565** fallback (ST77xx).  
+7. **Fills / gradient** — Horizontal color gradient + vertical bars; looks good on color, reasonable on mono.  
+8. **Perf fills** — Checkerboard fills, prints average draw time.  
+9. **Overlap merge** — Thin lines to expose page/byte merges on mono OLEDs.  
+10. **Final** — “DEMO COMPLETE / PRESS RESET”.
 
-> If your wiring differs, copy the closest env and adjust the pin macros and `*_HZ` frequency.
+While running, the **main loop** also animates five moving rectangles using a normalized framebuffer composition path and overlays a **FPS** HUD (antialiased A8 overlay blended into the RGBA framebuffer).
 
-## Tuning
-- **Rotation**: `-DSGFX_ROT=0|1|2|3`
-- **Display size**: `-DSGFX_W` / `-DSGFX_H`
-- **Scratch buffer**: override with `-DSGFX_SCRATCH_BYTES=<bytes>` (default 4096).  
-  For 1bpp SSD1306, `1024` is enough; for 16bpp ST7789, keep `4096+` to allow tile buffers.
+## 2) Requirements
 
-## Portability status
-- Current HAL: **Arduino-generic**. That makes the same demo work on ESP32 / RP2040 / STM32 (Arduino core).
-- To extend beyond Arduino (e.g., Pico SDK, STM32 HAL, Zephyr), add a new `lib/SGFX/src/hal/<your-hal>/` and implement
-  `sgfx_hal_make_spi()` and/or `sgfx_hal_make_i2c()`. Then compile with `-DSGFX_HAL_<YOURHAL>=1` and provide a tiny
-  wrapper like the Arduino one if needed.
+- **Toolchain:** C++11 or later (Arduino uses C++ by default).  
+- **Targets:** Arduino frameworks for ESP32/STM32/RP2040 are known-good.  
+- **Displays:**  
+  - **SSD1306** (128×64 typical, I2C or SPI)  
+  - **ST7735** (160×128), **ST7789** (240×320), **ST7796** (320×480)
 
-## Notes
-- The demo avoids board-specific logic; only `Serial.begin()` is compiled when `ARDUINO` is defined.
-- Drivers supported here: `SSD1306` (I2C, 1bpp) and `ST7789` (SPI, RGB565).
-- You can add more drivers by implementing `sgfx_driver_ops_t` and exporting `sgfx_<name>_ops` + caps.
+## 3) Build flags (must set)
 
-Happy hacking.
+Pick a **bus**, a **driver**, **panel size**, and **pins/speeds**:
 
----
+| What                    | Define(s)                                             | Notes |
+|------------------------:|--------------------------------------------------------|------|
+| Bus                     | `SGFX_BUS_SPI` **or** `SGFX_BUS_I2C`                 | pick one |
+| Driver                  | `SGFX_DRV_SSD1306` / `SGFX_DRV_ST7735` / `SGFX_DRV_ST7789` / `SGFX_DRV_ST7796` | |
+| Panel size              | `SGFX_W`, `SGFX_H`                                    | logical drawing size |
+| SPI pins                | `SGFX_PIN_SCK`, `SGFX_PIN_MOSI`, `SGFX_PIN_CS`, `SGFX_PIN_DC`, `SGFX_PIN_RST` | required for SPI |
+| I2C pins & addr         | `SGFX_PIN_SCL`, `SGFX_PIN_SDA`, `SGFX_I2C_ADDR`       | required for I2C (0x3C/0x3D are common) |
+| Bus speed               | `SGFX_SPI_HZ` or `SGFX_I2C_HZ`                        | e.g. SPI 24–40 MHz; I2C 100–400 kHz |
+| Rotation at boot        | `SGFX_ROT`                                            | 0..3 |
+| Color order (ST77xx)    | `SGFX_DEFAULT_BGR`                                    | 0=RGB, **1=BGR** (often required) |
+| ST77xx offsets          | `SGFX_COLSTART`, `SGFX_ROWSTART`                       | module dependent |
 
+**Bus defaults (quick ref)** — SPI **MODE0**, MSB-first. I2C 100–400 kHz.
 
-## Non‑Arduino HALs (ESP‑IDF, STM32Cube)
-SGFX ships additional HAL backends so the same demo can run without the Arduino core.
+### Optional toggles
+- `SGFX_SCRATCH_BYTES` — size of the static scratch buffer (default **4096**).  
+  - For the built-in sprites: MONO1 needs `W*H/8` bytes (here 32×16 → 64 B), RGB565 needs `2*W*H` (32×16 → 1024 B).  
+- `SGFX_DEMO_FORCE_MONO1` or `SGFX_DEMO_FORCE_RGB565` — force a particular blit path.  
+- `SGFX_LOG_DEBUG=1` — enable verbose logs in SGFX.  
+- Tile/presenter tuning (if compiled in): `SGFX_MAX_LINE_PX`, `SGFX_TILE_W`, `SGFX_TILE_H`.
 
-### ESP‑IDF
-- Set `framework = espidf` and define `-DSGFX_HAL_ESPIDF=1` plus your bus/driver pins and speed.
-- Implementations live in `lib/SGFX/src/hal/espidf/` and use `i2c_master_write_to_device()` and `spi_device_transmit()`.
+## 4) PlatformIO examples
 
-### STM32Cube HAL
-- Set `framework = stm32cube` and define `-DSGFX_HAL_STM32CUBE=1`.
-- Provide a tiny `stm32_hal.h` that includes your MCU HAL header and declares:
-  ```c
-  extern SPI_HandleTypeDef hspi_sgfx;
-  extern I2C_HandleTypeDef hi2c_sgfx;
-  void sgfx_delay_ms(uint32_t ms);
-  void sgfx_gpio_set_dc(int level);
-  void sgfx_gpio_set_cs(int level);
-  void sgfx_gpio_set_rst(int level);
-  void sgfx_gpio_set_bl(int level);
-  ```
-  Wire those to your generated MX code (GPIO init + HAL handles).
+> Place the file as `src/main.cpp` and add these flags to your `platformio.ini`.  
+> **Include path note:** if SGFX headers are outside this demo folder, replace `-I src` with your real path (e.g. `-I ../../src`) or add SGFX as a library.
 
-### POSIX (optional idea)
-Add a `hal/posix` that dumps frames to PPM/PNG for CI. Ask if you want me to include it.
+### ESP32-S3 + ST7789 240×320 (SPI)
+```ini
+[env:esp32s3-st7789]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+build_src_filter = +<src/main.cpp>
+build_flags =
+  -I src                 ; or: -I ../../src  (point to SGFX headers)
+  -D SGFX_BUS_SPI
+  -D SGFX_DRV_ST7789
+  -D SGFX_W=240 -D SGFX_H=320
+  -D SGFX_PIN_SCK=36 -D SGFX_PIN_MOSI=35 -D SGFX_PIN_CS=34 -D SGFX_PIN_DC=33 -D SGFX_PIN_RST=37
+  -D SGFX_SPI_HZ=40000000
+  -D SGFX_DEFAULT_BGR=1
+  -D SGFX_ROT=0
+monitor_speed = 115200
+````
 
+### RP2040 + SSD1306 128×64 (I2C @ 0x3C)
 
+```ini
+[env:pico-ssd1306]
+platform = raspberrypi
+board = pico
+framework = arduino
+build_src_filter = +<src/main.cpp>
+build_flags =
+  -I src                 ; or: -I ../../src
+  -D SGFX_BUS_I2C
+  -D SGFX_DRV_SSD1306
+  -D SGFX_W=128 -D SGFX_H=64
+  -D SGFX_PIN_SCL=5 -D SGFX_PIN_SDA=4
+  -D SGFX_I2C_ADDR=0x3C
+  -D SGFX_I2C_HZ=400000
+  -D SGFX_ROT=0
+monitor_speed = 115200
+```
 
-### ESP32 family flavors (S2/S3/C3/C6/H2)
-SGFX stays agnostic across the whole Espressif line. Use the right `board = ...` and pins, and pick Arduino or ESP‑IDF:
-- **Arduino**: just set `-DSGFX_HAL_ARDUINO_GENERIC=1` and your pins; cores handle the SoC differences.
-- **ESP‑IDF**: set `-DSGFX_HAL_ESPIDF=1`. If needed, select the controller instances:
-  - `-DSGFX_IDF_SPI_HOST=SPI2_HOST` (S2/S3/C3/C6) or leave default (classic ESP32 uses `HSPI_HOST` fallback).
-  - `-DSGFX_IDF_I2C_PORT=I2C_NUM_0` (or `_1` if you wired to the second controller).
-The provided envs compile as-is; adjust pins to your wiring.
+### STM32F103 + ST7735 160×128 (SPI)
+
+```ini
+[env:bluepill-st7735]
+platform = ststm32
+board = genericSTM32F103C8
+framework = arduino
+build_src_filter = +<src/main.cpp>
+build_flags =
+  -I src                 ; or: -I ../../src
+  -D SGFX_BUS_SPI
+  -D SGFX_DRV_ST7735
+  -D SGFX_W=160 -D SGFX_H=128
+  -D SGFX_PIN_SCK=13 -D SGFX_PIN_MOSI=15 -D SGFX_PIN_CS=12 -D SGFX_PIN_DC=11 -D SGFX_PIN_RST=10
+  -D SGFX_SPI_HZ=24000000
+  -D SGFX_DEFAULT_ROTATION=1
+  -D SGFX_DEFAULT_BGR=0
+  -D SGFX_COLSTART=0 -D SGFX_ROWSTART=0
+  -D SGFX_ROT=1
+monitor_speed = 115200
+```
+
+## 5) Code structure notes (what to look for)
+
+* **Arduino vs POSIX**:
+  Under Arduino, the code uses `delay()`/`millis()`. On POSIX it provides `SGFX_DELAY()` and `SGFX_MILLIS()` shims via `nanosleep/clock_gettime` so you can run logic headless for timing (no framebuffer dump unless you provide a POSIX HAL).
+
+* **Autoinit**:
+  `sgfx_autoinit(&dev, scratch, sizeof scratch)` picks up your **build flags** (bus/driver/pins/speeds) and initializes the device.
+  If it fails at boot, `setup()` sits in a safe loop; the `loop()` also tries one **lazy re-init** pass.
+
+* **FB vs device paths**:
+  Many scenes attempt an **RGBA framebuffer path** (`sgfx_fb_create`, then `sgfx_present_frame`). If FB creation or driver “present” path isn’t available, scenes gracefully **fallback** to device drawing.
+
+* **AA overlay**:
+  The FPS HUD uses an 8-bit alpha overlay (`a8_fb_t`) blended into the RGBA FB (non-premultiplied alpha). Only changed regions are marked dirty: `sgfx_fb_mark_dirty_px(...)`.
+
+* **Resilient BLIT**:
+  `try_blit_any*()` builds a small sprite, then attempts **MONO1** first (ideal for SSD1306), falling back to **RGB565** if not supported or if mono resources are constrained.
+
+## 6) Troubleshooting
+
+* **Blank/white screen** → verify CS/DC/RST wiring; for ST77xx try `-DSGFX_DEFAULT_BGR=1`.
+* **Shifted image** → set `-DSGFX_COLSTART` / `-DSGFX_ROWSTART`.
+* **Flicker/tearing (SPI)** → lower `SGFX_SPI_HZ` or increase `SGFX_MAX_LINE_PX`.
+* **I2C lockups** → confirm address (0x3C/0x3D) and stay at 100–400 kHz first.
+* **Wrong orientation** → check `SGFX_ROT`, `SGFX_DEFAULT_ROTATION`, and `SGFX_W/H`.
+* **FB path fails** → device/driver might not support present-by-window; the demo will fallback automatically.
+
+## 7) Notes for power users
+
+* **Memory use**: FB = `4 * W * H` bytes; line buffer ≈ `2 * max_line_px`; scratch as defined by `SGFX_SCRATCH_BYTES`.
+* **DMA/alignment**: Some MCUs prefer 4-byte aligned buffers for SPI DMA.
+* **Multiple displays**: The demo uses a single global `sgfx_device_t dev`. Multi-display needs separate device instances and careful bus sharing.
+
+## 8) Expected serial output (typical)
+
+* Init banner from your HAL/driver (if `SGFX_LOG_DEBUG=1`).
+* Perf result line in the **Perf fills** scene, e.g., `AVG=2.7 ms`.
