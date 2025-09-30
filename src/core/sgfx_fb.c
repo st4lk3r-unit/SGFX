@@ -2,6 +2,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(ARDUINO) && defined(ESP32) && defined(BOARD_HAS_PSRAM)
+  #include <esp_heap_caps.h>
+  #ifndef SGFX_FB_ALLOC
+    #define SGFX_FB_ALLOC(sz) heap_caps_malloc((sz), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+  #endif
+  #ifndef SGFX_FB_CALLOC
+    static inline void* _sgfx_heap_caps_calloc(size_t n, size_t size){
+      void* p = heap_caps_malloc(n*size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (p) memset(p, 0, n*size);
+      return p;
+    }
+    #define SGFX_FB_CALLOC(n,sz) _sgfx_heap_caps_calloc((n),(sz))
+  #endif
+  #define SGFX_FB_FREE(p) heap_caps_free((p))
+#else
+  #define SGFX_FB_ALLOC(sz)  malloc((sz))
+  #define SGFX_FB_CALLOC(n,sz) calloc((n),(sz))
+  #define SGFX_FB_FREE(p)    free((p))
+#endif
+
 static uint32_t crc32_u8(const uint8_t* p, size_t n){
   uint32_t c=0xFFFFFFFFu;
   for(size_t i=0;i<n;i++){ c ^= p[i];
@@ -15,16 +35,16 @@ int sgfx_fb_create(sgfx_fb_t* fb, int w, int h, int tile_w, int tile_h){
   if (w<=0 || h<=0 || tile_w<=0 || tile_h<=0) return SGFX_ERR_INVAL;
   fb->w=w; fb->h=h; fb->tile_w=tile_w; fb->tile_h=tile_h;
   fb->stride = w * (int)sizeof(sgfx_rgba8_t);
-  fb->px = (sgfx_rgba8_t*)calloc((size_t)w*h, sizeof(sgfx_rgba8_t));
+  fb->px = (sgfx_rgba8_t*)SGFX_FB_CALLOC((size_t)w*h, sizeof(sgfx_rgba8_t));
   if(!fb->px) return SGFX_ERR_NOMEM;
 
   fb->tiles_x = (w + tile_w - 1)/tile_w;
   fb->tiles_y = (h + tile_h - 1)/tile_h;
   size_t tiles = (size_t)fb->tiles_x * fb->tiles_y;
-  fb->tile_crc   = (uint32_t*)calloc(tiles, sizeof(uint32_t));
+  fb->tile_crc  = (uint32_t*)calloc(tiles, sizeof(uint32_t));
   fb->tile_dirty = (uint8_t*) calloc(tiles, 1);
   if(!fb->tile_crc || !fb->tile_dirty){
-    free(fb->px); free(fb->tile_crc); free(fb->tile_dirty);
+    SGFX_FB_FREE(fb->px); free(fb->tile_crc); free(fb->tile_dirty);
     memset(fb,0,sizeof(*fb));
     return SGFX_ERR_NOMEM; /* partial failure cleaned */
   }
@@ -32,7 +52,7 @@ int sgfx_fb_create(sgfx_fb_t* fb, int w, int h, int tile_w, int tile_h){
 }
 
 void sgfx_fb_destroy(sgfx_fb_t* fb){
-  free(fb->px); free(fb->tile_crc); free(fb->tile_dirty);
+  SGFX_FB_FREE(fb->px); free(fb->tile_crc); free(fb->tile_dirty);
   memset(fb,0,sizeof(*fb));
 }
 

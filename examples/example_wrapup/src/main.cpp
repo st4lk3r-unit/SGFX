@@ -5,6 +5,9 @@
    - Resilient BLIT (tries MONO1 then RGB565)
    - Perf timing
 */
+#ifndef SGFX_DEMO_DOUBLE_FB
+#define SGFX_DEMO_DOUBLE_FB 0
+#endif
 
 #include <cstdio>
 #ifdef ARDUINO
@@ -70,6 +73,27 @@ static inline void measure_5x7(const char* s, int sx,int sy, int* out_w, int* ou
   int h = 7*sy;
   if (out_w) *out_w = w;
   if (out_h) *out_h = h;
+}
+
+/* How often to update the numeric FPS readout (ms). 300–500ms is comfy. */
+#ifndef FPS_UPDATE_MS
+#define FPS_UPDATE_MS 500
+#endif
+
+/* ---------- Fixed FPS HUD bbox (max 3 digits) ---------- */
+#define FPS_SX  2
+#define FPS_SY  2
+#define FPS_PAD 3
+#define FPS_BX  4
+#define FPS_BY  4
+#define FPS_MAX_DIGITS 3
+static inline void fps_overlay_bbox_dims(int* bx,int* by,int* bw,int* bh){
+  const int tw_max = (5*FPS_SX + 1*FPS_SX)*FPS_MAX_DIGITS - FPS_SX;
+  const int th     = 7*FPS_SY;
+  if (bx) *bx = FPS_BX;
+  if (by) *by = FPS_BY;
+  if (bw) *bw = tw_max + 2*FPS_PAD;
+  if (bh) *bh = th     + 2*FPS_PAD;
 }
 
 /* Antialiased 5x7 raster into A8 via supersampling (SS×SS) */
@@ -901,7 +925,9 @@ void loop(){
   // --- Normalized FB animation benchmark (permille + FB composition + HUD overlay) ---
   static bool fb_inited = false;
   static sgfx_fb_t fb_main;       // full screen
-  static sgfx_fb_t fb_anim;       // same size (or viewport)
+  #if SGFX_DEMO_DOUBLE_FB
+  static sgfx_fb_t fb_anim;       // second buffer for explicit double-buffering
+  #endif
   static sgfx_present_t pr;
   static bool nofb_mode = false;
 
@@ -909,15 +935,25 @@ void loop(){
   static RectPM R[5];
   static int W=0,H=0;
 
+  // prev rect per sprite (for minimal erase/redraw on FB)
+  static int px[5] = {0}, py[5] = {0}, pw[5] = {0}, ph[5] = {0};
+  static bool first_frame = true;
+
   if (!fb_inited){
     W = (int)dev.caps.width;
     H = (int)dev.caps.height;
 
     int rcA = sgfx_fb_create(&fb_main, W, H, 16, 16);
+    #if SGFX_DEMO_DOUBLE_FB
     int rcB = sgfx_fb_create(&fb_anim, W, H, 16, 16);
+    #endif
+    #if SGFX_DEMO_DOUBLE_FB
     if (rcA != SGFX_OK || rcB != SGFX_OK || fb_main.px == NULL || fb_anim.px == NULL){
+    #else
+    if (rcA != SGFX_OK || fb_main.px == NULL){
+    #endif
       nofb_mode = true;
-    }else{
+    } else {
       sgfx_present_init(&pr, W);
       bool fb_supported = dev.drv && dev.drv->set_window && dev.drv->write_pixels;
       if (!fb_supported) { nofb_mode = true; }
@@ -929,68 +965,80 @@ void loop(){
       R[i].c = (sgfx_rgba8_t){ (uint8_t)(40+i*40), (uint8_t)(200 - i*30), (uint8_t)(80 + i*30), 255 };
     }
     fb_inited = true;
-  }
-  if (nofb_mode){
-    // Fallback: device drawing
-    sgfx_clear(&dev, BLACK());
+    }
+    if (nofb_mode){
+      // Fallback: device drawing
+      sgfx_clear(&dev, BLACK());
+      for (int i=0;i<5;++i){
+        RectPM& r = R[i];
+        r.xpm += r.vxpm; r.ypm += r.vypm;
+        if (r.xpm < 0 || r.xpm + r.wpm >= 1000){ r.vxpm = -r.vxpm; r.xpm += r.vxpm; }
+        if (r.ypm < 0 || r.ypm + r.hpm >= 1000){ r.vypm = -r.vypm; r.ypm += r.vypm; }
+        int x = (r.xpm * dev.caps.width  + 500)/1000;
+        int y = (r.ypm * dev.caps.height + 500)/1000;
+        int w = (r.wpm * dev.caps.width  + 500)/1000;
+        int h = (r.hpm * dev.caps.height + 500)/1000;
+        sgfx_fill_rect(&dev, x,y,w,h, r.c);
+      }
+      if (dev.drv && dev.drv->present){ dev.drv->present(&dev); }
+      SGFX_DELAY(6);
+
+    } else {
+      // Compose on framebuffer with minimal damage (erase old rects, draw new rects)
+    sgfx_fb_t* tgt = &fb_main; // draw straight into main FB for fastest path
+    if (first_frame){
+      fb_full_clear(tgt, BLACK()); // one-time clear
+      first_frame = false;
+    }
+
     for (int i=0;i<5;++i){
       RectPM& r = R[i];
+      // erase previous rect area only
+      if (pw[i] > 0 && ph[i] > 0){
+        fb_fill_rect(tgt, px[i], py[i], pw[i], ph[i], BLACK());
+      }
+      // advance motion
       r.xpm += r.vxpm; r.ypm += r.vypm;
       if (r.xpm < 0 || r.xpm + r.wpm >= 1000){ r.vxpm = -r.vxpm; r.xpm += r.vxpm; }
       if (r.ypm < 0 || r.ypm + r.hpm >= 1000){ r.vypm = -r.vypm; r.ypm += r.vypm; }
-      int x = (r.xpm * dev.caps.width  + 500)/1000;
-      int y = (r.ypm * dev.caps.height + 500)/1000;
-      int w = (r.wpm * dev.caps.width  + 500)/1000;
-      int h = (r.hpm * dev.caps.height + 500)/1000;
-      sgfx_fill_rect(&dev, x,y,w,h, r.c);
-    }
-    if (dev.drv && dev.drv->present){ dev.drv->present(&dev); }
-    SGFX_DELAY(6);
-  } else {
-    // Compose on framebuffers
-
-    // Clear anim buffer where rectangles were (simple full clear)
-    for (int j=0;j<H;++j){
-      memset((uint8_t*)fb_anim.px + (size_t)j*fb_anim.stride, 0x00, (size_t)W*sizeof(sgfx_rgba8_t));
-    }
-    sgfx_fb_mark_dirty_px(&fb_anim, 0,0,W,H);
-
-    // Move and draw into fb_anim
-    for (int i=0;i<5;++i){
-      RectPM& r = R[i];
-      r.xpm += r.vxpm; r.ypm += r.vypm;
-      if (r.xpm < 0 || r.xpm + r.wpm >= 1000){ r.vxpm = -r.vxpm; r.xpm += r.vxpm; }
-      if (r.ypm < 0 || r.ypm + r.hpm >= 1000){ r.vypm = -r.vypm; r.ypm += r.vypm; }
+      // project to pixels
       int x = (r.xpm * W + 500)/1000;
       int y = (r.ypm * H + 500)/1000;
       int w = (r.wpm * W + 500)/1000;
       int h = (r.hpm * H + 500)/1000;
-      fb_fill_rect(&fb_anim, x,y,w,h, r.c);
+      // draw new rect + mark dirty (fb_fill_rect already marks)
+      fb_fill_rect(tgt, x,y,w,h, r.c);
+      // remember for next frame
+      px[i]=x; py[i]=y; pw[i]=w; ph[i]=h;
     }
 
-    // Copy anim → main (memcpy rows)
-    for (int j=0;j<H;++j){
-      memcpy((uint8_t*)fb_main.px + (size_t)j*fb_main.stride,
-             (const uint8_t*)fb_anim.px + (size_t)j*fb_anim.stride,
-             (size_t)W*sizeof(sgfx_rgba8_t));
-    }
-    sgfx_fb_mark_dirty_px(&fb_main, 0,0,W,H);
-
-    // FPS overlay blended on main
-    static float fps_accum = 0.0f;
+    // FPS overlay (rate-limited numeric update, drawn every frame for stability)
     static uint32_t t_prev = 0;
+    static uint32_t acc_ms = 0;
+    static int      acc_frames = 0;
+    static float    fps_display = 0.0f;  // last computed value we actually show
     uint32_t t_now = SGFX_MILLIS();
     if (t_prev==0) t_prev = t_now;
-    float dt_ms = (float)(t_now - t_prev); t_prev = t_now;
-    float fps = (dt_ms > 0.0f) ? (1000.0f / dt_ms) : 0.0f;
-    draw_fps_overlay(&fb_main, fps);
+    uint32_t dt_ms_u32 = (t_now - t_prev); t_prev = t_now;
+    acc_ms     += dt_ms_u32;
+    acc_frames += 1;
+    if (acc_ms >= FPS_UPDATE_MS){
+      // average over the window; smoother and human-readable
+      if (acc_ms > 0){
+        fps_display = (1000.0f * (float)acc_frames) / (float)acc_ms;
+      }
+      acc_ms = 0; acc_frames = 0;
+    }
+    // Keep HUD area clean every frame, then draw the last computed value
+    int fx,fy,fw,fh; fps_overlay_bbox_dims(&fx,&fy,&fw,&fh);
+    fb_fill_rect(&fb_main, fx, fy, fw, fh, BLACK());   // or WHITE() for a white box
+    draw_fps_overlay(&fb_main, fps_display);
 
-    // Present main
     do {
       int _rc = sgfx_present_frame(&pr, &dev, &fb_main);
       if (_rc == SGFX_ERR_NOSUP) { nofb_mode = true; }
     } while(0);
-    SGFX_DELAY(6);
+    SGFX_DELAY(0);
   }
 
 }
