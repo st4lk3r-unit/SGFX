@@ -1,4 +1,5 @@
 #include "sgfx_fb.h"
+#include "sgfx_text.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,8 +35,9 @@ int sgfx_fb_create(sgfx_fb_t* fb, int w, int h, int tile_w, int tile_h){
   memset(fb,0,sizeof(*fb));
   if (w<=0 || h<=0 || tile_w<=0 || tile_h<=0) return SGFX_ERR_INVAL;
   fb->w=w; fb->h=h; fb->tile_w=tile_w; fb->tile_h=tile_h;
-  fb->stride = w * (int)sizeof(sgfx_rgba8_t);
-  fb->px = (sgfx_rgba8_t*)SGFX_FB_CALLOC((size_t)w*h, sizeof(sgfx_rgba8_t));
+  fb->stride = w * (int)SGFX_BYTESPP;
+  size_t sz  = (size_t)w * (size_t)h * (size_t)SGFX_BYTESPP;
+  fb->px = (uint8_t*)SGFX_FB_CALLOC(1, sz);
   if(!fb->px) return SGFX_ERR_NOMEM;
 
   fb->tiles_x = (w + tile_w - 1)/tile_w;
@@ -44,8 +46,7 @@ int sgfx_fb_create(sgfx_fb_t* fb, int w, int h, int tile_w, int tile_h){
   fb->tile_crc  = (uint32_t*)calloc(tiles, sizeof(uint32_t));
   fb->tile_dirty = (uint8_t*) calloc(tiles, 1);
   if(!fb->tile_crc || !fb->tile_dirty){
-    SGFX_FB_FREE(fb->px); free(fb->tile_crc); free(fb->tile_dirty);
-    memset(fb,0,sizeof(*fb));
+    SGFX_FB_FREE(fb->px); free(fb->tile_crc); free(fb->tile_dirty);    memset(fb,0,sizeof(*fb));
     return SGFX_ERR_NOMEM; /* partial failure cleaned */
   }
   return SGFX_OK;
@@ -85,10 +86,10 @@ void sgfx_fb_rehash_tiles(sgfx_fb_t* fb, int x,int y,int w,int h){
       int py = ty*fb->tile_h;
       int tw = (px+fb->tile_w>fb->w)? (fb->w-px): fb->tile_w;
       int th = (py+fb->tile_h>fb->h)? (fb->h-py): fb->tile_h;
-      uint8_t* base = (uint8_t*)fb->px + (size_t)py*fb->stride + (size_t)px*sizeof(sgfx_rgba8_t);
+      uint8_t* base = (uint8_t*)fb->px + (size_t)py*fb->stride + (size_t)px*SGFX_BYTESPP;
       uint32_t crc = 0;
       for(int j=0;j<th;++j)
-        crc ^= crc32_u8(base + (size_t)j*fb->stride, (size_t)tw*sizeof(sgfx_rgba8_t));
+        crc ^= crc32_u8(base + (size_t)j*fb->stride, (size_t)tw*SGFX_BYTESPP);
       size_t idx = (size_t)ty*fb->tiles_x + (size_t)tx;
       if (crc != fb->tile_crc[idx]){ fb->tile_crc[idx]=crc; fb->tile_dirty[idx]=1; }
     }
@@ -107,8 +108,8 @@ void sgfx_ui_fill_norm(sgfx_fb_t* fb, int xpm,int ypm,int wpm,int hpm, sgfx_rgba
   if(w<=0||h<=0) return;
 
   for(int j=0;j<h;++j){
-    sgfx_rgba8_t* row = (sgfx_rgba8_t*)((uint8_t*)fb->px + (size_t)(y+j)*fb->stride) + x;
-    for(int i=0;i<w;++i) row[i]=c;
+    sgfx_color_t* row = (sgfx_color_t*)((uint8_t*)fb->px + (size_t)(y+j)*fb->stride) + x;
+    for(int i=0;i<w;++i) row[i] = SGFX_PACK(c);
   }
   sgfx_fb_mark_dirty_px(fb, x,y,w,h);
 }
@@ -123,40 +124,73 @@ void sgfx_fb_fill_rect_px(sgfx_fb_t* fb, int x, int y, int w, int h, sgfx_rgba8_
   if (y + h > fb->h) h = fb->h - y;
   if (w<=0 || h<=0) return;
   for (int j=0; j<h; ++j){
-    sgfx_rgba8_t* row = (sgfx_rgba8_t*)((uint8_t*)fb->px + (size_t)(y+j)*fb->stride) + x;
-    for (int i=0; i<w; ++i) row[i] = c;
+    sgfx_color_t* row = (sgfx_color_t*)((uint8_t*)fb->px + (size_t)(y+j)*fb->stride) + x;
+    for (int i=0; i<w; ++i) row[i] = SGFX_PACK(c);
   }
   sgfx_fb_mark_dirty_px(fb, x, y, w, h);
 }
 
-/* Draw 5x7 ASCII text using the 8x8 font table cropped to 5x7.
-   Scaling: sx,sy >= 1. Only printable 0x20..0x7E. */
-extern const uint8_t font8x8_basic[128][8];
-void sgfx_fb_text5x7_scaled(sgfx_fb_t* fb, int x, int y, const char* s, sgfx_rgba8_t c, int sx, int sy){
-  if (!fb || !fb->px || !s || sx<=0 || sy<=0) return;
-  int cx = x;
-  int est_w = 0;
-  for (const char* p = s; *p; ++p){
-    unsigned ch = (unsigned char)*p;
-    if (ch >= 32 && ch <= 126) est_w += 6*sx; /* 5px glyph + 1px space */
-  }
-  if (est_w>0) sgfx_fb_mark_dirty_px(fb, x, y, est_w, 7*sy);
+/* --- A8 → FB blend ------------------------------------------------------- */
+/* Premultiply alpha using mask and color.a, then blend into FB format.     */
+static inline uint8_t u8_mul(uint8_t a, uint8_t b){ return (uint8_t)((a*b + 128) >> 8); }
+static inline uint16_t pack565(uint8_t r,uint8_t g,uint8_t b){
+  return (uint16_t)(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3));
+}
+static inline void unpack565(uint16_t c, uint8_t* r,uint8_t* g,uint8_t* b){
+  *r = (uint8_t)((c>>8)&0xF8); *r |= *r>>5;
+  *g = (uint8_t)((c>>3)&0xFC); *g |= *g>>6;
+  *b = (uint8_t)( c     &0x1F); *b = (*b<<3)|(*b>>2);
+}
 
-  for (; *s; ++s, cx += 6*sx){
-    unsigned ch = (unsigned char)*s;
-    if (ch < 32 || ch > 126) continue;
-    const uint8_t* glyph = font8x8_basic[ch];
-    for (int row=0; row<7; ++row){
-      uint8_t bits = glyph[row];
-      for (int col=0; col<5; ++col){
-        /* crop to columns 1..5 (LSB-left) */
-        if (bits & (uint8_t)(1u << (col+1))){
-          for (int yy=0; yy<sy; ++yy){
-            sgfx_rgba8_t* dst = (sgfx_rgba8_t*)((uint8_t*)fb->px + (size_t)(y + row*sy + yy)*fb->stride) + (cx + col*sx);
-            for (int xx=0; xx<sx; ++xx) dst[xx] = c;
-          }
-        }
-      }
+void sgfx_fb_blit_a8(sgfx_fb_t* fb, int x, int y,
+                     const uint8_t* a8, int a8_pitch,
+                     int w, int h, sgfx_rgba8_t color)
+{
+  if(!fb || !a8 || w<=0 || h<=0) return;
+  /* clip */
+  if (x<0){ int d=-x; x=0; w-=d; a8 += d; }
+  if (y<0){ int d=-y; y=0; h-=d; a8 += (size_t)d*a8_pitch; }
+  if (x+w > fb->w) w = fb->w - x;
+  if (y+h > fb->h) h = fb->h - y;
+  if (w<=0 || h<=0) return;
+
+  const uint8_t cr = color.r, cg = color.g, cb = color.b, ca = color.a;
+
+#if defined(SGFX_COLOR_RGBA8888) && SGFX_COLOR_RGBA8888
+  for(int j=0;j<h;++j){
+    uint8_t* dst = (uint8_t*)fb->px + (size_t)(y+j)*fb->stride + (size_t)x*4;
+    const uint8_t* src = a8 + (size_t)j*a8_pitch;
+    for(int i=0;i<w;++i){
+      uint8_t ma = src[i];
+      if(!ma){ dst+=4; continue; }
+      uint8_t a  = u8_mul(ma, ca);               /* effective alpha */
+      uint8_t ia = 255 - a;
+      /* dst= (a*color + (1-a)*dst) */
+      dst[0] = (uint8_t)((a*cb + ia*dst[0] + 127)/255);
+      dst[1] = (uint8_t)((a*cg + ia*dst[1] + 127)/255);
+      dst[2] = (uint8_t)((a*cr + ia*dst[2] + 127)/255);
+      dst[3] = (uint8_t)((a + ia*dst[3] + 127)/255);
+      dst+=4;
     }
   }
+#else /* RGB565 FB */
+  for(int j=0;j<h;++j){
+    uint16_t* dst = (uint16_t*)((uint8_t*)fb->px + (size_t)(y+j)*fb->stride) + x;
+    const uint8_t* src = a8 + (size_t)j*a8_pitch;
+    for(int i=0;i<w;++i){
+      uint8_t ma = src[i];
+      if(!ma){ dst++; continue; }
+      uint8_t a  = u8_mul(ma, ca);
+      if (a == 255) { *dst++ = pack565(cr, cg, cb); continue; }
+      uint8_t ia = 255 - a;
+      uint8_t dr,dg,db; unpack565(dst[0], &dr,&dg,&db);
+      uint8_t r = (uint8_t)((a*cr + ia*dr + 127)/255);
+      uint8_t g = (uint8_t)((a*cg + ia*dg + 127)/255);
+      uint8_t b = (uint8_t)((a*cb + ia*db + 127)/255);
+      dst[0] = pack565(r,g,b);
+      dst++;
+    }
+  }
+#endif
+  sgfx_fb_mark_dirty_px(fb, x,y,w,h);
 }

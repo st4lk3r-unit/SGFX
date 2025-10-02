@@ -39,6 +39,9 @@ static struct {
   uint8_t* fb;              /* 1bpp, pages stacked: width*(height/8) */
   int fb_bytes;
   int w, h, pages;
+  /* buffered window state for compat write_pixels path */
+  int win_x, win_y, win_w, win_h;
+  int cur_col, cur_row;
 } s;
 
 /* ---- init ---- */
@@ -212,13 +215,72 @@ static int ssd_present(sgfx_device_t* d){
   return SGFX_OK;
 }
 
+
+/* ---- compat: rectangular set_window + RGB565 write_pixels for SGFX FB ---- */
+/* We don't program the panel window here; we'll patch s.fb per row then stream that page */
+static int ssd_set_window_rect(sgfx_device_t* d, int x,int y,int w,int h){
+  (void)d;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x + w > s.w) w = s.w - x;
+  if (y + h > s.h) h = s.h - y;
+  s.win_x = x; s.win_y = y; s.win_w = w; s.win_h = h;
+  s.cur_col = 0; s.cur_row = 0;
+  return SGFX_OK;
+}
+
+/* Convert a single RGB565 pixel to mono bit (1=on) */
+static inline int mono_from_rgb565(uint16_t p){
+  /* fastest: any non-black -> on */
+  return p != 0;
+}
+
+/* Stream of RGB565 words comes row-by-row; we merge into s.fb then push that page band */
+static int ssd_write_pixels_rect(sgfx_device_t* d, const void* src, size_t count, sgfx_pixfmt_t fmt){
+  if (fmt != SGFX_FMT_RGB565) return SGFX_ERR_NOSUP;
+  const uint16_t* px = (const uint16_t*)src;
+  size_t i = 0;
+  while (i < count){
+    int x = s.win_x + s.cur_col;
+    int y = s.win_y + s.cur_row;
+    if (x < 0 || x >= s.w || y < 0 || y >= s.h) {
+      /* skip but keep advancing to avoid infinite loop */
+    } else {
+      uint8_t* fbbyte = &s.fb[(y>>3)*s.w + x];
+      uint8_t mask = (uint8_t)(1u << (y & 7));
+      if (mono_from_rgb565(px[i])) *fbbyte |=  mask;
+      else                         *fbbyte &= (uint8_t)~mask;
+    }
+    s.cur_col++;
+    i++;
+    if (s.cur_col >= s.win_w){
+      /* end of row: push this row's page bytes */
+      int page = (s.win_y + s.cur_row) >> 3;
+      int x0 = s.win_x;
+      int x1 = s.win_x + s.win_w - 1;
+      int rc = ssd_set_window(d, x0, page, x1);
+      if (rc) return rc;
+      const uint8_t* row = &s.fb[page*s.w + x0];
+      rc = ssd_data(d, row, (size_t)(x1 - x0 + 1));
+      if (rc) return rc;
+      s.cur_col = 0;
+      s.cur_row++;
+      if (s.cur_row >= s.win_h){
+        /* rectangle complete */
+        s.cur_row = s.cur_col = 0;
+        break;
+      }
+    }
+  }
+  return SGFX_OK;
+}
 /* ---- driver ops ---- */
 const sgfx_driver_ops_t sgfx_ssd1306_ops = {
   .init = ssd_init,
   .reset = NULL,
   .set_rotation = ssd_set_rotation,
-  .set_window = NULL,          /* not used by higher layer now */
-  .write_pixels = NULL,
+  .set_window = ssd_set_window_rect,          /* compat for SGFX present */
+  .write_pixels = ssd_write_pixels_rect,
   .fill_rect = ssd_fill_rect,  /* everything funnels here */
   .power = NULL,
   .invert = NULL,

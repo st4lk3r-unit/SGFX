@@ -3,6 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Default to RGB565 framebuffer unless RGBA8888 explicitly selected */
+#if !defined(SGFX_COLOR_RGB565) && !defined(SGFX_COLOR_RGBA8888)
+#  define SGFX_COLOR_RGB565 1
+#endif
+
 static inline uint16_t rgb565_of(sgfx_rgba8_t c){
   return (uint16_t)(((c.r & 0xF8)<<8) | ((c.g & 0xFC)<<3) | (c.b>>3));
 }
@@ -25,18 +30,30 @@ static void push_rect(sgfx_present_t* pr, sgfx_device_t* d,
   int maxw = pr->linebuf_px;
   d->drv->set_window(d, x,y,w,h);
   for(int j=0;j<h;++j){
-    const sgfx_rgba8_t* src = (const sgfx_rgba8_t*)((const uint8_t*)fb->px + (size_t)(y+j)*fb->stride) + x;
-    int remaining = w, col = 0;
-    while (remaining > 0){
-      int chunk = remaining > maxw ? maxw : remaining;
-      for(int i=0;i<chunk;++i) pr->linebuf[i] = rgb565_of(src[col+i]);
-      d->drv->write_pixels(d, pr->linebuf, (size_t)chunk, SGFX_FMT_RGB565);
-      remaining -= chunk;
-      col += chunk;
-    }
+    #if defined(SGFX_COLOR_RGBA8888) && SGFX_COLOR_RGBA8888
+      /* RGBA8888 framebuffer: convert each chunk into linebuf (RGB565) */
+      const sgfx_rgba8_t* src = (const sgfx_rgba8_t*)((const uint8_t*)fb->px + (size_t)(y+j)*fb->stride) + x;
+      int remaining = w, col = 0;
+      while (remaining > 0){
+        int chunk = remaining > maxw ? maxw : remaining;
+        for(int i=0;i<chunk;++i) pr->linebuf[i] = rgb565_of(src[col+i]);
+        d->drv->write_pixels(d, pr->linebuf, (size_t)chunk, SGFX_FMT_RGB565);
+        remaining -= chunk;
+        col += chunk;
+      }
+    #else
+      /* RGB565 framebuffer: push rows directly (no conversion) */
+      const uint16_t* src565 = (const uint16_t*)((const uint8_t*)fb->px + (size_t)(y+j)*fb->stride) + x;
+      int remaining = w, col = 0;
+      while (remaining > 0){
+        int chunk = remaining > maxw ? maxw : remaining;
+        d->drv->write_pixels(d, src565 + col, (size_t)chunk, SGFX_FMT_RGB565);
+        remaining -= chunk;
+        col += chunk;
+      }
+    #endif
   }
 }
-
 
 static sgfx_present_stats_t g_sgfx_stats;
 void sgfx_present_stats_reset(sgfx_present_stats_t* s){

@@ -24,6 +24,10 @@
 # error "Select a display driver: e.g. -DSGFX_DRV_ST7789"
 #endif
 
+#ifndef SGFX_STRICT_RGB565
+#define SGFX_STRICT_RGB565 1
+#endif
+
 /* --- Driver registry decls --- */
 #if defined(SGFX_DRV_ST7789)
   extern const sgfx_driver_ops_t sgfx_st7789_ops;
