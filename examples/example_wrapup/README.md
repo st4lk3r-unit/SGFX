@@ -39,7 +39,7 @@ Pick a **bus**, a **driver**, **panel size**, and **pins/speeds**:
 | I2C pins & addr         | `SGFX_PIN_SCL`, `SGFX_PIN_SDA`, `SGFX_I2C_ADDR`       | required for I2C (0x3C/0x3D are common) |
 | Bus speed               | `SGFX_SPI_HZ` or `SGFX_I2C_HZ`                        | e.g. SPI 24–40 MHz; I2C 100–400 kHz |
 | Rotation at boot        | `SGFX_ROT`                                            | 0..3 |
-| Color order (ST77xx)    | `SGFX_DEFAULT_BGR`                                    | 0=RGB, **1=BGR** (often required) |
+| Color order (ST77xx)    | `SGFX_DEFAULT_BGR_ORDER`                                    | 0=RGB, **1=BGR** (often required) |
 | ST77xx offsets          | `SGFX_COLSTART`, `SGFX_ROWSTART`                       | module dependent |
 
 **Bus defaults (quick ref)** — SPI **MODE0**, MSB-first. I2C 100–400 kHz.
@@ -51,11 +51,6 @@ Pick a **bus**, a **driver**, **panel size**, and **pins/speeds**:
 - `SGFX_LOG_DEBUG=1` — enable verbose logs in SGFX.  
 - Tile/presenter tuning (if compiled in): `SGFX_MAX_LINE_PX`, `SGFX_TILE_W`, `SGFX_TILE_H`.
 
-## 4) PlatformIO examples
-
-> Place the file as `src/main.cpp` and add these flags to your `platformio.ini`.  
-> **Include path note:** if SGFX headers are outside this demo folder, replace `-I src` with your real path (e.g. `-I ../../src`) or add SGFX as a library.
-
 ### ESP32-S3 + ST7789 240×320 (SPI)
 ```ini
 [env:esp32s3-st7789]
@@ -64,13 +59,13 @@ board = esp32-s3-devkitc-1
 framework = arduino
 build_src_filter = +<src/main.cpp>
 build_flags =
-  -I src                 ; or: -I ../../src  (point to SGFX headers)
+  -I ../../include       ; or: -I include  (point to SGFX headers)
   -D SGFX_BUS_SPI
   -D SGFX_DRV_ST7789
   -D SGFX_W=240 -D SGFX_H=320
   -D SGFX_PIN_SCK=36 -D SGFX_PIN_MOSI=35 -D SGFX_PIN_CS=34 -D SGFX_PIN_DC=33 -D SGFX_PIN_RST=37
   -D SGFX_SPI_HZ=40000000
-  -D SGFX_DEFAULT_BGR=1
+  -D SGFX_DEFAULT_BGR_ORDER=1
   -D SGFX_ROT=0
 monitor_speed = 115200
 ````
@@ -84,7 +79,7 @@ board = pico
 framework = arduino
 build_src_filter = +<src/main.cpp>
 build_flags =
-  -I src                 ; or: -I ../../src
+  -I ../../include       ; or: -I include
   -D SGFX_BUS_I2C
   -D SGFX_DRV_SSD1306
   -D SGFX_W=128 -D SGFX_H=64
@@ -104,14 +99,14 @@ board = genericSTM32F103C8
 framework = arduino
 build_src_filter = +<src/main.cpp>
 build_flags =
-  -I src                 ; or: -I ../../src
+  -I ../../include       ; or: -I include
   -D SGFX_BUS_SPI
   -D SGFX_DRV_ST7735
   -D SGFX_W=160 -D SGFX_H=128
   -D SGFX_PIN_SCK=13 -D SGFX_PIN_MOSI=15 -D SGFX_PIN_CS=12 -D SGFX_PIN_DC=11 -D SGFX_PIN_RST=10
   -D SGFX_SPI_HZ=24000000
   -D SGFX_DEFAULT_ROTATION=1
-  -D SGFX_DEFAULT_BGR=0
+  -D SGFX_DEFAULT_BGR_ORDER=0
   -D SGFX_COLSTART=0 -D SGFX_ROWSTART=0
   -D SGFX_ROT=1
 monitor_speed = 115200
@@ -137,7 +132,7 @@ monitor_speed = 115200
 
 ## 6) Troubleshooting
 
-* **Blank/white screen** → verify CS/DC/RST wiring; for ST77xx try `-DSGFX_DEFAULT_BGR=1`.
+* **Blank/white screen** → verify CS/DC/RST wiring; for ST77xx try `-DSGFX_DEFAULT_BGR_ORDER=1`.
 * **Shifted image** → set `-DSGFX_COLSTART` / `-DSGFX_ROWSTART`.
 * **Flicker/tearing (SPI)** → lower `SGFX_SPI_HZ` or increase `SGFX_MAX_LINE_PX`.
 * **I2C lockups** → confirm address (0x3C/0x3D) and stay at 100–400 kHz first.
@@ -149,8 +144,3 @@ monitor_speed = 115200
 * **Memory use**: FB = `4 * W * H` bytes; line buffer ≈ `2 * max_line_px`; scratch as defined by `SGFX_SCRATCH_BYTES`.
 * **DMA/alignment**: Some MCUs prefer 4-byte aligned buffers for SPI DMA.
 * **Multiple displays**: The demo uses a single global `sgfx_device_t dev`. Multi-display needs separate device instances and careful bus sharing.
-
-## 8) Expected serial output (typical)
-
-* Init banner from your HAL/driver (if `SGFX_LOG_DEBUG=1`).
-* Perf result line in the **Perf fills** scene, e.g., `AVG=2.7 ms`.
