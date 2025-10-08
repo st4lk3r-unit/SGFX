@@ -21,6 +21,21 @@ static int st_invert(sgfx_device_t* d, bool on);
 #  define SGFX_DEFAULT_INVERT SGFX_ST7796_INVERT
 #endif
 
+#ifndef SGFX_PANEL_W
+#  ifdef SGFX_W
+#    define SGFX_PANEL_W SGFX_W
+#  else
+#    define SGFX_PANEL_W 320
+#  endif
+#endif
+#ifndef SGFX_PANEL_H
+#  ifdef SGFX_H
+#    define SGFX_PANEL_H SGFX_H
+#  else
+#    define SGFX_PANEL_H 480
+#  endif
+#endif
+
 /* ========== ST77xx Commands (subset used) ========== */
 #define ST77_SWRESET   0x01
 #define ST77_SLPIN     0x10
@@ -33,6 +48,11 @@ static int st_invert(sgfx_device_t* d, bool on);
 #define ST77_RAMWR     0x2C
 #define ST77_MADCTL    0x36
 #define ST77_COLMOD    0x3A
+
+#ifndef SGFX_DEFAULT_INVERT
+#  define SGFX_DEFAULT_INVERT 0
+#endif
+
 
 /* ========== Offsets (alias common macros) ========== */
 #ifndef SGFX_ST77XX_XOFF
@@ -99,10 +119,8 @@ static int st_init(sgfx_device_t* d){
   uint8_t mad = st77xx_madctl_for(0, p->bgr);
   if (st_send(d, ST77_MADCTL, &mad, 1)) return -1;
 
-#ifdef SGFX_DEFAULT_INVERT
   if (SGFX_DEFAULT_INVERT) { if (st_send(d, ST77_INVON, NULL, 0)) return -1; }
   else { if (st_send(d, ST77_INVOFF, NULL, 0)) return -1; }
-#endif
   if (st_send(d, ST77_DISPON, NULL, 0)) return -1;
   if (d->bus->ops->delay_ms) d->bus->ops->delay_ms(d->bus, 10);
   return 0;
@@ -143,10 +161,51 @@ static int st_set_window(sgfx_device_t* d, int x, int y, int w, int h){
 }
 
 static int st_write_pixels(sgfx_device_t* d, const void* px, size_t count, sgfx_pixfmt_t src_fmt){
-  if (src_fmt == SGFX_FMT_RGB565 && d->bus->ops->write_pixels)
-    return d->bus->ops->write_pixels(d->bus, px, count, src_fmt);
-  size_t bytes = (src_fmt == SGFX_FMT_RGB565) ? count * 2 : count;
-  return d->bus->ops->write_data(d->bus, px, bytes);
+  if (src_fmt == SGFX_FMT_RGB565) {
+#ifdef SGFX_RGB565_BYTESWAP
+    // Swap bytes to send high-byte first (panel expects big-endian 565).
+    // Use a reusable heap buffer to avoid large stack usage and stack overflows.
+#ifndef SGFX_SPI_SWAP_BUF_BYTES
+#define SGFX_SPI_SWAP_BUF_BYTES 4096
+#endif
+    static uint8_t* swap_buf = NULL;
+    static size_t   swap_cap = 0;
+
+    size_t need = SGFX_SPI_SWAP_BUF_BYTES;
+    if (swap_cap < need){
+      uint8_t* nb = (uint8_t*)realloc(swap_buf, need);
+      if (!nb) return SGFX_ERR_NOMEM;
+      swap_buf = nb; swap_cap = need;
+    }
+
+    const uint8_t* s = (const uint8_t*)px;
+    size_t remaining = count;               // pixels
+    while (remaining) {
+      size_t npx = remaining;
+      size_t maxpx = (swap_cap / 2);
+      if (npx > maxpx) npx = maxpx;
+
+      // swap npx pixels into swap_buf
+      for (size_t i = 0; i < npx; ++i) {
+        swap_buf[2*i]   = s[2*i+1];  // high byte first
+        swap_buf[2*i+1] = s[2*i];    // then low byte
+      }
+
+      int r = d->bus->ops->write_data(d->bus, swap_buf, npx * 2);
+      if (r) return r;
+      s += npx * 2;
+      remaining -= npx;
+    }
+    return SGFX_OK;
+#else
+    // No byteswap: forward to bus optimized path if available, otherwise raw bytes
+    if (d->bus->ops->write_pixels)
+      return d->bus->ops->write_pixels(d->bus, px, count, src_fmt);
+    return d->bus->ops->write_data(d->bus, px, count * 2);
+#endif
+  }
+  // Non-565 formats: treat 'count' as bytes
+  return d->bus->ops->write_data(d->bus, px, count);
 }
 
 static int st_fill_rect(sgfx_device_t* d, int x, int y, int w, int h, sgfx_rgba8_t c){
@@ -175,11 +234,11 @@ static int st_present(sgfx_device_t* d){
 }
 
 static const sgfx_caps_t st_caps = {
-  .width  = 320,
-  .height = 480,
+  .width  = SGFX_PANEL_W,
+  .height = SGFX_PANEL_H,
 };
 
-const sgfx_caps_t sgfx_st7796_caps = { .width = 320, .height = 480, .native_fmt = SGFX_FMT_RGB565, .bpp = 16, .caps = 0 };
+const sgfx_caps_t sgfx_st7796_caps = { .width = SGFX_PANEL_W, .height = SGFX_PANEL_H, .native_fmt = SGFX_FMT_RGB565, .bpp = 16, .caps = 0 };
 
 const sgfx_driver_ops_t sgfx_st7796_ops = {
   .init         = st_init,
@@ -200,4 +259,3 @@ static int st_invert(sgfx_device_t* d, bool on){
 }
 
 #endif /* SGFX_DRV_ST7796 */
-
