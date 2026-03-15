@@ -4,6 +4,7 @@
 #include "sgfx.h"
 #include "sgfx_hal.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* --- Required basics --- */
 #ifndef SGFX_W
@@ -40,24 +41,33 @@
 # define SGFX__DRV_OPS  (&sgfx_ssd1306_ops)
 # define SGFX__DRV_CAPS (&sgfx_ssd1306_caps_128x64)
 #elif defined(SGFX_DRV_ST7735)
-  /* >>> Add these lines <<< */
   extern const sgfx_driver_ops_t sgfx_st7735_ops;
   extern const sgfx_caps_t       sgfx_st7735_caps;
-#define SGFX__DRV_OPS  (&sgfx_st7735_ops)
-#define SGFX__DRV_CAPS (&sgfx_st7735_caps)
+# define SGFX__DRV_OPS  (&sgfx_st7735_ops)
+# define SGFX__DRV_CAPS (&sgfx_st7735_caps)
 #elif defined(SGFX_DRV_ST7796)
   extern const sgfx_driver_ops_t sgfx_st7796_ops;
   extern const sgfx_caps_t       sgfx_st7796_caps;
-#define SGFX__DRV_OPS  (&sgfx_st7796_ops)
-#define SGFX__DRV_CAPS (&sgfx_st7796_caps)
+# define SGFX__DRV_OPS  (&sgfx_st7796_ops)
+# define SGFX__DRV_CAPS (&sgfx_st7796_caps)
 #else
 # error "Selected driver not yet wired in sgfx_port.h"
 #endif
 
 /* --- Autoinit convenience --- */
+/*
+ * sgfx_autoinit — one-shot helper for single-display projects.
+ *
+ * Allocates a sgfx_bus_t on the heap (consistent with sgfx_open_spi/i2c)
+ * so the device holds a stable pointer after this function returns.
+ * The bus is freed automatically if driver init fails.
+ *
+ * For multi-display or custom bring-up use sgfx_open_spi / sgfx_open_i2c
+ * directly instead.
+ */
 static inline int sgfx_autoinit(sgfx_device_t* dev, void* scratch, size_t scratch_len) {
-  static sgfx_bus_t bus;
-  memset(&bus, 0, sizeof bus);
+  sgfx_bus_t* bus = (sgfx_bus_t*)calloc(1, sizeof(sgfx_bus_t));
+  if (!bus) return SGFX_ERR_NOMEM;
 
 #if defined(SGFX_BUS_SPI)
   sgfx_hal_cfg_spi_t cfg = {
@@ -70,7 +80,7 @@ static inline int sgfx_autoinit(sgfx_device_t* dev, void* scratch, size_t scratc
     .pin_bl   = SGFX_PIN_BL,
     .hz       = SGFX_SPI_HZ
   };
-  if (sgfx_hal_make_spi(&bus, &cfg) < 0) return -1;
+  if (sgfx_hal_make_spi(bus, &cfg) < 0) { free(bus); return -1; }
 #elif defined(SGFX_BUS_I2C)
   sgfx_hal_cfg_i2c_t cfg = {
     .pin_sda = SGFX_PIN_SDA,
@@ -80,14 +90,16 @@ static inline int sgfx_autoinit(sgfx_device_t* dev, void* scratch, size_t scratc
     .addr    = SGFX_I2C_ADDR,
     .hz      = SGFX_I2C_HZ
   };
-  if (sgfx_hal_make_i2c(&bus, &cfg) < 0) return -1;
+  if (sgfx_hal_make_i2c(bus, &cfg) < 0) { free(bus); return -1; }
 #else
 # error "BUS not implemented in autoinit"
 #endif
+
   sgfx_caps_t caps = *SGFX__DRV_CAPS;
   caps.width  = SGFX_W;
   caps.height = SGFX_H;
-  int rc = sgfx_init(dev, &bus, SGFX__DRV_OPS, &caps, scratch, scratch_len);
-  if (!rc) sgfx_set_rotation(dev, SGFX_ROT);
-  return rc;
+  int rc = sgfx_init(dev, bus, SGFX__DRV_OPS, &caps, scratch, scratch_len);
+  if (rc) { free(bus); return rc; }
+  sgfx_set_rotation(dev, SGFX_ROT);
+  return 0;
 }

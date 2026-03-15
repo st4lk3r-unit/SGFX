@@ -1,5 +1,6 @@
 // sgfx_font_builtin.c — 5x7 ASCII bitmap table + accessors
 #include "sgfx_font_builtin.h"
+#include "sgfx.h"
 #include <stddef.h>
 
 typedef struct { char ch; uint8_t col[5]; } glyph5x7_t;
@@ -121,6 +122,23 @@ bool sgfx_font5x7_get(char ch, uint8_t out_col[5]){
     }
   }
   return false;
+}
+
+/* Public convenience wrappers declared in sgfx.h */
+int sgfx_text5x7(sgfx_device_t* d, int x, int y, const char* s, sgfx_rgba8_t c) {
+    return sgfx_font5x7_draw(d, x, y, s, c, 1, 1);
+}
+int sgfx_text8x8(sgfx_device_t* d, int x, int y, const char* s, sgfx_rgba8_t c) {
+    /* 5x7 glyphs scaled to fill roughly 8x8 cells (scale 1x1, advance 6 px) */
+    return sgfx_font5x7_draw(d, x, y, s, c, 1, 1);
+}
+int sgfx_text5x7_scaled(sgfx_device_t* d, int x, int y,
+                        const char* s, sgfx_rgba8_t c, int sx, int sy) {
+    return sgfx_font5x7_draw(d, x, y, s, c, sx, sy);
+}
+int sgfx_text8x8_scaled(sgfx_device_t* d, int x, int y,
+                        const char* s, sgfx_rgba8_t c, int sx, int sy) {
+    return sgfx_font5x7_draw(d, x, y, s, c, sx, sy);
 }
 
 int sgfx_font5x7_draw(sgfx_device_t* d, int x, int y,
