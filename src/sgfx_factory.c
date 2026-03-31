@@ -1,6 +1,7 @@
 #include "sgfx.h"
 #include "sgfx_hal.h"
 #include <string.h>
+#include <stdlib.h>
 
 // HAL makers provided elsewhere
 int sgfx_open_spi(sgfx_device_t* dev,
