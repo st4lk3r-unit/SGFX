@@ -105,8 +105,12 @@ static int st_init(sgfx_device_t* d){
   uint8_t colmod = 0x55;
   st_send(d, ST77_COLMOD, &colmod, 1);
 
-  /* Base MADCTL: BGR is typical for ST7789 panels */
+  /* Base MADCTL: configurable BGR; most ST7789V2 panels (e.g. Cardputer) use RGB order */
+#ifdef SGFX_ST7789_BGR
   g_st.madctl_base = MADCTL_BGR;
+#else
+  g_st.madctl_base = 0;
+#endif
 
   /* Default modes */
   st_send(d, ST77_INVOFF, NULL, 0);
@@ -165,6 +169,31 @@ static int st_set_window(sgfx_device_t* d, int x, int y, int w, int h){
 }
 
 static int st_write_pixels(sgfx_device_t* d, const void* px, size_t count, sgfx_pixfmt_t src_fmt){
+#ifdef SGFX_RGB565_BYTESWAP
+  if (src_fmt == SGFX_FMT_RGB565) {
+    /* Panel expects big-endian RGB565; ESP32 stores uint16_t little-endian → swap bytes. */
+#ifndef SGFX_SPI_SWAP_BUF_BYTES
+#define SGFX_SPI_SWAP_BUF_BYTES 4096
+#endif
+    static uint8_t swap_buf[SGFX_SPI_SWAP_BUF_BYTES];
+    const uint8_t* s = (const uint8_t*)px;
+    size_t remaining = count;
+    while (remaining) {
+      size_t npx = remaining;
+      size_t maxpx = sizeof(swap_buf) / 2;
+      if (npx > maxpx) npx = maxpx;
+      for (size_t i = 0; i < npx; ++i) {
+        swap_buf[2*i]   = s[2*i+1];
+        swap_buf[2*i+1] = s[2*i];
+      }
+      int r = d->bus->ops->write_data(d->bus, swap_buf, npx * 2);
+      if (r) return r;
+      s += npx * 2;
+      remaining -= npx;
+    }
+    return 0;
+  }
+#endif
   /* Preferred path: bus supports write_pixels for RGB565 */
   if (src_fmt == SGFX_FMT_RGB565 && d->bus->ops->write_pixels)
     return d->bus->ops->write_pixels(d->bus, px, count, src_fmt);
@@ -179,6 +208,9 @@ static int st_fill_rect(sgfx_device_t* d, int x, int y, int w, int h, sgfx_rgba8
   if (st_set_window(d, x, y, w, h)) return -1;
 
   uint16_t p = pack565(c);
+#ifdef SGFX_RGB565_BYTESWAP
+  p = (uint16_t)((p >> 8) | (p << 8));
+#endif
 
   if (d->bus->ops->write_repeat)
     return d->bus->ops->write_repeat(d->bus, &p, sizeof(p), (size_t)w * (size_t)h);
