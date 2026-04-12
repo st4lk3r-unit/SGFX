@@ -119,13 +119,40 @@ static int st7735_set_window(sgfx_device_t* d, int x,int y,int w,int h){
 }
 
 static int st7735_write_pixels(sgfx_device_t* d, const void* src, size_t count, sgfx_pixfmt_t fmt){
-  if (fmt != SGFX_FMT_RGB565) return SGFX_ERR_NOSUP;  /* driver streams RGB565 */
+  if (fmt != SGFX_FMT_RGB565) return SGFX_ERR_NOSUP;
+#ifdef SGFX_RGB565_BYTESWAP
+  /* ESP32 stores uint16_t LE; display expects BE — swap each pixel's bytes */
+#ifndef SGFX_ST7735_SWAP_BUF_BYTES
+#  define SGFX_ST7735_SWAP_BUF_BYTES 4096
+#endif
+  static uint8_t swap_buf[SGFX_ST7735_SWAP_BUF_BYTES];
+  const uint8_t* s = (const uint8_t*)src;
+  size_t remaining = count;
+  while (remaining) {
+    size_t npx = remaining;
+    size_t maxpx = sizeof(swap_buf) / 2;
+    if (npx > maxpx) npx = maxpx;
+    for (size_t i = 0; i < npx; ++i) {
+      swap_buf[2*i]   = s[2*i+1];
+      swap_buf[2*i+1] = s[2*i];
+    }
+    int r = sgfx_data(d, swap_buf, npx * 2);
+    if (r) return r;
+    s += npx * 2;
+    remaining -= npx;
+  }
+  return 0;
+#else
   return sgfx_data(d, src, count * 2);
+#endif
 }
 
 static int st7735_fill_rect(sgfx_device_t* d, int x,int y,int w,int h, sgfx_rgba8_t c){
-  /* pack RGB565 */
+  /* pack RGB565, byte-swap if needed */
   uint16_t p = (uint16_t)(((c.r & 0xF8)<<8) | ((c.g & 0xFC)<<3) | (c.b>>3));
+#ifdef SGFX_RGB565_BYTESWAP
+  p = (uint16_t)((p << 8) | (p >> 8));
+#endif
   int rc = st7735_set_window(d, x, y, w, h);
   if (rc) return rc;
 
