@@ -37,9 +37,9 @@ static inline void idf_gpio_set(sgfx_bus_t* b, int pin_id, bool level){
   idf_spi_ctx_t* c = (idf_spi_ctx_t*)b->user;
   int pin = -1;
   switch(pin_id){
-    case 0: /* DC */  pin = c->pin_dc; break;
-    case 1: /* BL */  pin = c->pin_bl; break;
-    case 2: /* RST */ pin = c->pin_rst; break;
+    case SGFX_GPIO_DC:  pin = c->pin_dc; break;
+    case SGFX_GPIO_BL:  pin = c->pin_bl; break;
+    case SGFX_GPIO_RST: pin = c->pin_rst; break;
     default: break;
   }
   if (pin >= 0){

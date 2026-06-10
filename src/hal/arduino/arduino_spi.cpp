@@ -125,10 +125,13 @@ static void spi_delay(sgfx_bus_t* b, uint32_t ms){ (void)b; delay(ms); }
 static void spi_gpio_set(sgfx_bus_t* b, int pin_id, bool level){
     spi_bus_t* s = (spi_bus_t*)b->user;
   int pin = -1;
-  if (pin_id==0) pin = s->pin_dc;
-  else if (pin_id==1) pin = s->pin_cs;
-  else if (pin_id==2) pin = s->pin_rst;
-  else if (pin_id==3) pin = s->pin_bl;
+  switch (pin_id){
+    case SGFX_GPIO_DC:  pin = s->pin_dc;  break;
+    case SGFX_GPIO_BL:  pin = s->pin_bl;  break;
+    case SGFX_GPIO_RST: pin = s->pin_rst; break;
+    default: break;
+  }
+  /* CS is intentionally not exposed through gpio_set(); SPI write paths own CS. */
   if (pin >= 0) digitalWrite(pin, level ? HIGH : LOW);
 }
 

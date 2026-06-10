@@ -55,9 +55,6 @@ typedef struct {
 
 static st_priv_t g_st;
 
-/* HAL pin-id convention:
- *   DC=0, BL=1, RST=2  (see HALs in lib/SGFX/src/hal/*)
- */
 
 static inline int st_send(sgfx_device_t* d, uint8_t cmd, const void* data, size_t n){
   if (d->bus->ops->write_cmd(d->bus, cmd)) return -1;
@@ -87,11 +84,11 @@ static inline void st_effective_offsets(uint8_t rot, uint16_t* xo, uint16_t* yo)
 static int st_init(sgfx_device_t* d){
   /* Optional hard reset */
   if (d->bus->ops->gpio_set){
-    d->bus->ops->gpio_set(d->bus, 2 /*RST*/, 1);
+    d->bus->ops->gpio_set(d->bus, SGFX_GPIO_RST, 1);
     if (d->bus->ops->delay_ms) d->bus->ops->delay_ms(d->bus, 10);
-    d->bus->ops->gpio_set(d->bus, 2 /*RST*/, 0);
+    d->bus->ops->gpio_set(d->bus, SGFX_GPIO_RST, 0);
     if (d->bus->ops->delay_ms) d->bus->ops->delay_ms(d->bus, 10);
-    d->bus->ops->gpio_set(d->bus, 2 /*RST*/, 1);
+    d->bus->ops->gpio_set(d->bus, SGFX_GPIO_RST, 1);
     if (d->bus->ops->delay_ms) d->bus->ops->delay_ms(d->bus, 120);
   }
 
@@ -118,7 +115,7 @@ static int st_init(sgfx_device_t* d){
   st_send(d, ST77_DISPON, NULL, 0);
 
   /* Backlight on if wired */
-  if (d->bus->ops->gpio_set) d->bus->ops->gpio_set(d->bus, 1 /*BL*/, 1);
+  if (d->bus->ops->gpio_set) d->bus->ops->gpio_set(d->bus, SGFX_GPIO_BL, 1);
 
   /* Cache portrait offsets; rotation applied in set_rotation/set_window */
   g_st.xoff_portrait = SGFX_ST77XX_XOFF;

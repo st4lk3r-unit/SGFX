@@ -35,9 +35,9 @@ static inline void stm_delay(sgfx_bus_t* b, uint32_t ms){ (void)b; sgfx_delay_ms
 static inline void stm_gpio_set(sgfx_bus_t* b, int pin_id, bool level){
   (void)b;
   switch(pin_id){
-    case 0: sgfx_gpio_set_dc(level); break;
-    case 1: sgfx_gpio_set_bl(level); break;
-    case 2: sgfx_gpio_set_rst(level); break;
+    case SGFX_GPIO_DC:  sgfx_gpio_set_dc(level);  break;
+    case SGFX_GPIO_BL:  sgfx_gpio_set_bl(level);  break;
+    case SGFX_GPIO_RST: sgfx_gpio_set_rst(level); break;
     default: break;
   }
 }

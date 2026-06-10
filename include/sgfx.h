@@ -57,6 +57,16 @@ typedef struct sgfx_bus sgfx_bus_t;
 typedef struct sgfx_device sgfx_device_t;
 
 /* ---------- Bus ops (HAL) ---------- */
+/* GPIO ids used by driver -> HAL calls.
+ * Keep this tiny and transport-neutral: CS is owned by bus write paths, while
+ * drivers may request only side-band control lines.
+ */
+enum {
+  SGFX_GPIO_DC  = 0,
+  SGFX_GPIO_BL  = 1,
+  SGFX_GPIO_RST = 2
+};
+
 typedef struct {
   int  (*begin)(sgfx_bus_t*);                             /* claim bus / set CS */
   void (*end)(sgfx_bus_t*);                               /* release bus */
@@ -66,7 +76,7 @@ typedef struct {
   int  (*write_pixels)(sgfx_bus_t*, const void* px, size_t count, sgfx_pixfmt_t src_fmt);
   int  (*read_data)(sgfx_bus_t*, void* buf, size_t len);  /* optional */
   void (*delay_ms)(sgfx_bus_t*, uint32_t ms);
-  void (*gpio_set)(sgfx_bus_t*, int pin_id, bool level);  /* RESET/DC/BL if needed */
+  void (*gpio_set)(sgfx_bus_t*, int pin_id, bool level);  /* SGFX_GPIO_* side-band pins */
 } sgfx_bus_ops_t;
 
 struct sgfx_bus {

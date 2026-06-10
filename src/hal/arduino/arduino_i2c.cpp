@@ -73,8 +73,8 @@ static int i2c_read_data(sgfx_bus_t* b, void* buf, size_t len){ (void)b; (void)b
 static void i2c_delay(sgfx_bus_t* b, uint32_t ms){ (void)b; delay(ms); }
 static void i2c_gpio_set(sgfx_bus_t* b, int pin_id, bool level){
     i2c_bus_t* s=(i2c_bus_t*)b->user;
-  if (pin_id==2 && s->pin_rst>=0) digitalWrite(s->pin_rst, level?HIGH:LOW);
-  if (pin_id==3 && s->pin_bl>=0)  digitalWrite(s->pin_bl,  level?HIGH:LOW);
+  if (pin_id==SGFX_GPIO_BL  && s->pin_bl>=0)  digitalWrite(s->pin_bl,  level?HIGH:LOW);
+  if (pin_id==SGFX_GPIO_RST && s->pin_rst>=0) digitalWrite(s->pin_rst, level?HIGH:LOW);
 }
 
 static const sgfx_bus_ops_t VOPS = {
