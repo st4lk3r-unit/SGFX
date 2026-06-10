@@ -45,6 +45,20 @@
 # endif
 #endif
 
+/* ========== Inversion mode ========== */
+/* Some ST77xx/ST7789 panels need INVON for correct colors.
+ * Symptom when wrong: black appears white and warm colors appear cyan/bluish.
+ *
+ * Generic flag:      SGFX_ST77XX_INVERT=1
+ * ST7789-only flag:  SGFX_ST7789_INVERT=1
+ */
+#ifndef SGFX_ST77XX_INVERT
+# define SGFX_ST77XX_INVERT 0
+#endif
+#ifndef SGFX_ST7789_INVERT
+# define SGFX_ST7789_INVERT SGFX_ST77XX_INVERT
+#endif
+
 /* ========== Private state ========== */
 typedef struct {
   uint16_t xoff_portrait;   /* portrait-native offsets as provided by flags */
@@ -110,7 +124,11 @@ static int st_init(sgfx_device_t* d){
 #endif
 
   /* Default modes */
+#if SGFX_ST7789_INVERT
+  st_send(d, ST77_INVON, NULL, 0);
+#else
   st_send(d, ST77_INVOFF, NULL, 0);
+#endif
   st_send(d, ST77_NORON,  NULL, 0);
   st_send(d, ST77_DISPON, NULL, 0);
 
